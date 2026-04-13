@@ -28,6 +28,7 @@ const C = {
 export default function PlanView({
   onFile,
   loading,
+  baseLoading,
   base,
   baseSummary,
   datasetMode,
@@ -45,6 +46,7 @@ export default function PlanView({
   const [confirmRefresh, setConfirmRefresh] = useState(null) // { file } | null
 
   const hasPlan = !!(base?.ingest || hasOverride)
+  const showBaseBootLoading = !!(baseLoading && !hasPlan)
   const planName = datasetMode === 'base'
     ? (base?.sourceFileName || baseSummary?.fileName || 'Saved plan')
     : uploadedFileName || 'Uploaded plan'
@@ -130,7 +132,19 @@ export default function PlanView({
       </div>
 
       {/* Current plan card */}
-      {hasPlan ? (
+      {showBaseBootLoading ? (
+        <Card style={{ marginBottom: 16, borderStyle: 'dashed', borderColor: C.border }}>
+          <CardBody>
+            <div style={{ textAlign: 'center', padding: '16px 0', color: C.muted, fontSize: 13 }}>
+              Loading default plan…
+              <div style={{ marginTop: 8, width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite', marginLeft: 'auto', marginRight: 'auto' }} />
+              <div style={{ marginTop: 10, fontSize: 11.5, color: C.faint }}>
+                First load can take a few seconds (Excel ingest + engine prep).
+              </div>
+            </div>
+          </CardBody>
+        </Card>
+      ) : hasPlan ? (
         <Card style={{ marginBottom: 16 }}>
           <CardHeader title="Active Plan">
             <Pill type="green">Loaded</Pill>
