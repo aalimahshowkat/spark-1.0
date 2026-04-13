@@ -113,6 +113,7 @@ export function usePersistedBaseDataset() {
       const payload = {
         savedAt: nowIso(),
         sourceFileName: safeText(file.name),
+        workbookBlob: blob,
         ingest,
         audit: [
           {
@@ -161,6 +162,7 @@ export function usePersistedBaseDataset() {
       const payload = {
         savedAt: nowIso(),
         sourceFileName: safeText(file.name),
+        workbookBlob: file, // File is a Blob; persisted for "export as-is"
         ingest,
         audit: [
           ...(base?.audit || []),

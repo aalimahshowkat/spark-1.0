@@ -198,24 +198,20 @@ export default function PlanView({
       return row
     }
 
-    // Header row (A..I) plus Y/Z/AA labels for Orbit×VIBE multipliers.
-    const dmHeaderRow = makeRow(dmHeaders)
-    dmHeaderRow[24] = 'VIBE (Orbit multiplier)'
-    dmHeaderRow[25] = 'Orbit tier'
-    dmHeaderRow[26] = 'Multiplier'
-    const dmAoa = [dmHeaderRow]
+    // Phase totals header row (A..I). Orbit multiplier headers appear just above that section.
+    const dmAoa = [makeRow(dmHeaders)]
 
     // Example phase totals (left side) — a few rows
-    const phaseRow = (arr) => {
-      const row = makeRow(arr)
-      row[24] = '(phase totals row)'
-      row[25] = '—'
-      row[26] = '—'
-      return row
-    }
-    dmAoa.push(phaseRow(['Bond', 'CSM', 10, 12, 18, 8, 6, 4, 2]))
-    dmAoa.push(phaseRow(['Bond', 'PM', 8, 8, 12, 6, 4, 2, 1]))
-    dmAoa.push(phaseRow(['Bond', 'Analyst 1', 4, 6, 10, 5, 3, 2, 1]))
+    dmAoa.push(makeRow(['Bond', 'CSM', 10, 12, 18, 8, 6, 4, 2]))
+    dmAoa.push(makeRow(['Bond', 'PM', 8, 8, 12, 6, 4, 2, 1]))
+    dmAoa.push(makeRow(['Bond', 'Analyst 1', 4, 6, 10, 5, 3, 2, 1]))
+
+    // Orbit×VIBE multipliers headers in Y/Z/AA (row 5+ visually, after phase examples)
+    const multHeader = makeRow(new Array(9).fill(''))
+    multHeader[24] = 'VIBE (Orbit multiplier)'
+    multHeader[25] = 'Orbit tier'
+    multHeader[26] = 'Multiplier'
+    dmAoa.push(multHeader)
 
     // Orbit×VIBE multipliers in columns Y/Z/AA (index 24/25/26).
     // Provide the full 4×4 grid so CSM calculations have all keys.

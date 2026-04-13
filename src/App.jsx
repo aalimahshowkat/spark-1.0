@@ -248,7 +248,13 @@ export default function App() {
               <SparkAiView engineCalc={engineCalc} engineInput={engineInput} planName={planName} />
             )}
             {activeTab === 'exports' && (
-              <ExportsView data={data} engineInput={engineInput} workbookFile={uploadedFile} />
+              <ExportsView
+                data={data}
+                engineInput={engineInput}
+                workbookFile={uploadedFile}
+                baseWorkbookBlob={base?.workbookBlob || null}
+                baseWorkbookName={base?.sourceFileName || base?.ingest?.meta?.fileName || ''}
+              />
             )}
             {SHOW_ADVANCED && activeTab === 'dataEngine' && <DataEngineView uploadedFile={engineInput} />}
             {SHOW_ADVANCED && activeTab === 'logic'      && <LogicLayerView uploadedFile={engineInput} />}

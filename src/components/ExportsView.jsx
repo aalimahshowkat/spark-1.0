@@ -60,6 +60,29 @@ async function readWorkbookFromFile(file) {
   return XLSX.read(buf, { type: 'array', cellDates: true })
 }
 
+async function readWorkbookFromBlob(blob) {
+  const buf = await blob.arrayBuffer()
+  return XLSX.read(buf, { type: 'array', cellDates: true })
+}
+
+function extractSingleSheetWorkbook(wbIn, sheetName) {
+  const ws = wbIn?.Sheets?.[sheetName]
+  if (!ws) return null
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, sheetName)
+  return wb
+}
+
+function extractMultiSheetWorkbook(wbIn, sheetNames) {
+  const wb = XLSX.utils.book_new()
+  for (const name of (sheetNames || [])) {
+    const ws = wbIn?.Sheets?.[name]
+    if (!ws) continue
+    XLSX.utils.book_append_sheet(wb, ws, name)
+  }
+  return wb.SheetNames.length ? wb : null
+}
+
 async function readCapacityModelMeta(file) {
   const wb = await readWorkbookFromFile(file)
   const cm = wb?.Sheets?.['Capacity Model']
@@ -183,7 +206,7 @@ function buildDemandMatrixAoA(ingest) {
   return [DM_HEADERS, ...rows]
 }
 
-export default function ExportsView({ data, engineInput, workbookFile }) {
+export default function ExportsView({ data, engineInput, workbookFile, baseWorkbookBlob, baseWorkbookName }) {
   const hasWorkbook = workbookFile instanceof File
   const hasEngineDataset = !!engineInput
 
@@ -203,6 +226,38 @@ export default function ExportsView({ data, engineInput, workbookFile }) {
     if (engineInput?.kind === 'ingest' && engineInput.ingest) return safeFilePart(engineInput.ingest?.meta?.fileName || 'Base dataset')
     return ''
   }, [engineInput])
+
+  const canExportAsIs = useMemo(() => {
+    if (engineInput?.kind === 'file' && engineInput.file) return true
+    if (engineInput?.kind === 'ingest' && baseWorkbookBlob) return true
+    return false
+  }, [engineInput, baseWorkbookBlob])
+
+  const downloadOriginalWorkbook = async () => {
+    if (!canExportAsIs) return
+    const blob =
+      (engineInput?.kind === 'file' && engineInput.file) ? engineInput.file :
+      (engineInput?.kind === 'ingest' && baseWorkbookBlob) ? baseWorkbookBlob :
+      null
+    if (!blob) return
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const label = engineInput?.kind === 'ingest'
+      ? safeFilePart(baseWorkbookName || fileLabel || 'base')
+      : (fileLabel || 'current')
+    a.href = url
+    a.download = `SPARK_Workbook (as loaded) - ${label}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  const readSourceWorkbook = async () => {
+    if (engineInput?.kind === 'file' && engineInput.file) return await readWorkbookFromFile(engineInput.file)
+    if (engineInput?.kind === 'ingest' && baseWorkbookBlob) return await readWorkbookFromBlob(baseWorkbookBlob)
+    return null
+  }
 
   const activeScenario = useMemo(
     () => scenarios.find(s => s.id === selectedScenarioId) || null,
@@ -432,27 +487,77 @@ export default function ExportsView({ data, engineInput, workbookFile }) {
         <CardHeader title="Project List &amp; Demand Matrix" tag="Plan download">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <ActionButton
-              title={!hasEngineDataset ? 'Load a plan first' : prepLoading ? 'Preparing…' : 'Download Project List as Excel (for offline editing)'}
+              title={!hasEngineDataset ? 'Load a plan first' : !canExportAsIs ? 'Workbook bytes unavailable — re-save the plan from an upload' : 'Download Project List + Demand Base Matrix together (keeps formulas)'}
               onClick={async () => {
-                if (!hasEngineDataset || !baselineIngest || prepLoading) return
-                const aoa = buildProjectListAoA(baselineIngest)
-                const ws  = XLSX.utils.aoa_to_sheet(aoa)
-                const wb  = XLSX.utils.book_new()
-                XLSX.utils.book_append_sheet(wb, ws, 'Project List')
-                downloadWorkbook(wb, `SPARK_Project List - ${fileLabel || 'current'}.xlsx`)
+                if (!hasEngineDataset || prepLoading || !canExportAsIs) return
+                try {
+                  setPrepError(null)
+                  const wbSrc = await readSourceWorkbook()
+                  const wbOut = extractMultiSheetWorkbook(wbSrc, ['Project List', 'Demand Base Matrix'])
+                  if (!wbOut) throw new Error('Sheets "Project List" and/or "Demand Base Matrix" not found in the loaded workbook.')
+                  const label = engineInput?.kind === 'ingest'
+                    ? safeFilePart(baseWorkbookName || fileLabel || 'base')
+                    : (fileLabel || 'current')
+                  downloadWorkbook(wbOut, `SPARK_Planning Workbook - ${label}.xlsx`)
+                } catch (e) {
+                  setPrepError(e?.message || 'Failed to export Planning Workbook (as loaded).')
+                }
+              }}
+            >
+              Export Planning Workbook
+            </ActionButton>
+
+            <ActionButton
+              title={!hasEngineDataset ? 'Load a plan first' : !canExportAsIs ? 'Workbook bytes unavailable — re-save the plan from an upload' : 'Download the original workbook bytes as loaded'}
+              onClick={async () => {
+                if (!hasEngineDataset || prepLoading || !canExportAsIs) return
+                try {
+                  setPrepError(null)
+                  await downloadOriginalWorkbook()
+                } catch (e) {
+                  setPrepError(e?.message || 'Failed to download workbook.')
+                }
+              }}
+            >
+              Download original workbook
+            </ActionButton>
+
+            <ActionButton
+              title={!hasEngineDataset ? 'Load a plan first' : !canExportAsIs ? 'Workbook bytes unavailable — re-save the plan from an upload' : 'Download Project List as Excel (as loaded)'}
+              onClick={async () => {
+                if (!hasEngineDataset || prepLoading || !canExportAsIs) return
+                try {
+                  setPrepError(null)
+                  const wbSrc = await readSourceWorkbook()
+                  const wbOut = extractSingleSheetWorkbook(wbSrc, 'Project List')
+                  if (!wbOut) throw new Error('Sheet "Project List" not found in the loaded workbook.')
+                  const label = engineInput?.kind === 'ingest'
+                    ? safeFilePart(baseWorkbookName || fileLabel || 'base')
+                    : (fileLabel || 'current')
+                  downloadWorkbook(wbOut, `SPARK_Project List - ${label}.xlsx`)
+                } catch (e) {
+                  setPrepError(e?.message || 'Failed to export Project List (as loaded).')
+                }
               }}
             >
               Export Project List
             </ActionButton>
             <ActionButton
-              title={!hasEngineDataset ? 'Load a plan first' : 'Download Demand Base Matrix as Excel'}
+              title={!hasEngineDataset ? 'Load a plan first' : !canExportAsIs ? 'Workbook bytes unavailable — re-save the plan from an upload' : 'Download Demand Base Matrix as Excel (as loaded)'}
               onClick={async () => {
-                if (!hasEngineDataset || !baselineIngest || prepLoading) return
-                const aoa = buildDemandMatrixAoA(baselineIngest)
-                const ws  = XLSX.utils.aoa_to_sheet(aoa)
-                const wb  = XLSX.utils.book_new()
-                XLSX.utils.book_append_sheet(wb, ws, 'Demand Base Matrix')
-                downloadWorkbook(wb, `SPARK_Demand Base Matrix - ${fileLabel || 'current'}.xlsx`)
+                if (!hasEngineDataset || prepLoading || !canExportAsIs) return
+                try {
+                  setPrepError(null)
+                  const wbSrc = await readSourceWorkbook()
+                  const wbOut = extractSingleSheetWorkbook(wbSrc, 'Demand Base Matrix')
+                  if (!wbOut) throw new Error('Sheet "Demand Base Matrix" not found in the loaded workbook.')
+                  const label = engineInput?.kind === 'ingest'
+                    ? safeFilePart(baseWorkbookName || fileLabel || 'base')
+                    : (fileLabel || 'current')
+                  downloadWorkbook(wbOut, `SPARK_Demand Base Matrix - ${label}.xlsx`)
+                } catch (e) {
+                  setPrepError(e?.message || 'Failed to export Demand Base Matrix (as loaded).')
+                }
               }}
             >
               Export Demand Matrix
@@ -464,6 +569,16 @@ export default function ExportsView({ data, engineInput, workbookFile }) {
             Download the current plan's <Mono>Project List</Mono> or <Mono>Demand Base Matrix</Mono> as Excel files.
             Edit them offline, then re-upload to SPARK to refresh the plan — this is the recommended round-trip for bulk project changes.
           </div>
+          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--ink-muted)', lineHeight: 1.6 }}>
+            If your <Mono>Project List</Mono> contains formulas that reference the <Mono>Demand Base Matrix</Mono> (e.g. columns AG–AM),
+            use <strong>Export Planning Workbook</strong> so formulas continue to work after download.
+          </div>
+          {!canExportAsIs && hasEngineDataset && (
+            <div style={{ marginTop: 10, fontSize: 12, color: 'var(--amber)' }}>
+              This plan was loaded without storing the original workbook bytes, so exports can’t preserve the original sheet structure.
+              Re-upload the workbook and click <strong>Save as plan</strong> once to enable “as loaded” exports.
+            </div>
+          )}
           {!hasEngineDataset && (
             <div style={{ marginTop: 10, fontSize: 12, color: 'var(--ink-muted)' }}>
               Load a plan (or upload a file) to enable plan downloads.
