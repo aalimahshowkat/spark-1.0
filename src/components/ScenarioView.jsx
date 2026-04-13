@@ -1,0 +1,1922 @@
+/**
+ * ScenarioView.jsx — Scenario Planning UI
+ *
+ * Three-panel layout:
+ *   LEFT   — Scenario list + actions (always visible)
+ *   CENTER — Active panel: edit form | compare view | empty prompt
+ *   (no right panel — comparison lives inline in center)
+ *
+ * Panels:
+ *   'list'    — scenario list, no active selection
+ *   'edit'    — create / edit overrides (3 tabs: Projects / Resources / Assumptions)
+ *   'compare' — baseline vs scenario delta view
+ */
+
+import React, { useMemo, useRef, useState } from 'react'
+import { Bar } from 'react-chartjs-2'
+import { useScenario } from './useScenario.js'
+import { buildScenarioCapacityConfig, computeCapacityScenario, getScenarioSummary, ALL_ROLES } from '../engine/scenarioEngine.js'
+import { MONTHS, FTE_COUNT, ATTRITION_FACTOR, HRS_PER_PERSON_MONTH, PRIMARY_ROLES, VIBE_TYPES, LM_BUCKET_MULTIPLIERS, ORBIT_VIBE_MULTIPLIERS } from '../engine/schema.js'
+import { Card, CardHeader, CardBody, Tag, Pill, AlertBar, KpiStrip, KpiCard } from './ui.jsx'
+import { CHART_COLORS } from '../lib/chartSetup.js'
+
+// ─── Palette shortcuts ─────────────────────────────────────────────────────
+const C = {
+  accent:  'var(--accent)',
+  surface: 'var(--surface-0)',
+  surface1:'var(--surface-1)',
+  border:  'var(--border)',
+  ink:     'var(--ink)',
+  muted:   'var(--ink-muted)',
+  faint:   'var(--ink-faint)',
+  green:   'var(--green)',
+  amber:   'var(--amber)',
+  red:     'var(--red)',
+  sidebar: 'var(--sidebar-bg)',
+}
+
+export default function ScenarioView({ uploadedFile, baselineCalc, baselineData }) {
+  const sc = useScenario(uploadedFile, baselineCalc)
+  const { scenarios, panel, setPanel, editDraft, activeScenario } = sc
+
+  const hasFile = !!uploadedFile
+  const planningYear = baselineCalc?.meta?.planningYear || 2026
+
+  return (
+    <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', minHeight: 600 }}>
+
+      {/* ── LEFT: Scenario list ──────────────────────────────────────── */}
+      <ScenarioList sc={sc} hasFile={hasFile} />
+
+      {/* ── CENTER: Panel content ────────────────────────────────────── */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {!hasFile && <NoFilePrompt />}
+        {hasFile && panel === 'list' && !activeScenario && <StartPrompt onNew={(opts) => sc.newScenario(opts)} />}
+        {hasFile && panel === 'list' && activeScenario  && <ComparePanel sc={sc} baselineCalc={baselineCalc} />}
+        {hasFile && panel === 'edit' && editDraft        && <EditPanel sc={sc} baselineIngest={sc.baselineIngest} planningYear={planningYear} />}
+        {hasFile && panel === 'compare' && activeScenario && <ComparePanel sc={sc} baselineCalc={baselineCalc} />}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SCENARIO LIST (left column)
+// ─────────────────────────────────────────────────────────────────────────
+
+function ScenarioList({ sc, hasFile }) {
+  const { scenarios, activeScenarioId, newScenario, selectScenario, editScenario, removeScenario, cloneScenario } = sc
+
+  return (
+    <div style={{ width: 256, flexShrink: 0 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13.5, color: C.ink }}>Scenarios</div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 1 }}>{scenarios.length} saved</div>
+        </div>
+        <button
+          onClick={() => newScenario({ name: '' })}
+          disabled={!hasFile}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '6px 12px', borderRadius: 6,
+            background: hasFile ? C.accent : 'var(--surface-1)',
+            color: hasFile ? 'white' : C.muted,
+            border: 'none', fontSize: 12, fontWeight: 600,
+            cursor: hasFile ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--font-sans)',
+          }}
+        >
+          <span style={{ fontSize: 16, lineHeight: 1 }}>+</span> New
+        </button>
+      </div>
+
+      {/* List */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {scenarios.length === 0 && (
+          <div style={{ padding: '20px 0', textAlign: 'center', fontSize: 12, color: C.muted }}>
+            No scenarios yet
+          </div>
+        )}
+        {scenarios.map(s => {
+          const summary = getScenarioSummary(s)
+          const isActive = s.id === activeScenarioId
+          return (
+            <div
+              key={s.id}
+              onClick={() => hasFile && selectScenario(s.id)}
+              style={{
+                padding: '10px 12px',
+                borderRadius: 8,
+                border: `1.5px solid ${isActive ? C.accent : C.border}`,
+                background: isActive ? 'var(--accent-light)' : C.surface,
+                cursor: hasFile ? 'pointer' : 'not-allowed',
+                transition: 'border-color 0.12s',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6 }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, color: isActive ? 'var(--accent-hover, #7c3aed)' : C.ink, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {s.name || 'Untitled scenario'}
+                </div>
+                <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+                  <IconBtn title="Edit" onClick={e => { e.stopPropagation(); editScenario(s.id) }}>✎</IconBtn>
+                  <IconBtn title="Duplicate" onClick={e => { e.stopPropagation(); cloneScenario(s.id) }}>⎘</IconBtn>
+                  <IconBtn title="Delete" color={C.red} onClick={e => { e.stopPropagation(); removeScenario(s.id) }}>✕</IconBtn>
+                </div>
+              </div>
+              {summary.totalChanges > 0 && (
+                <div style={{ display: 'flex', gap: 5, marginTop: 6, flexWrap: 'wrap' }}>
+                  {summary.modified > 0 && <SmallBadge color={C.accent}>{summary.modified} project{summary.modified !== 1 ? 's' : ''}</SmallBadge>}
+                  {summary.excluded > 0 && <SmallBadge color={C.red}>{summary.excluded} excluded</SmallBadge>}
+                  {summary.fteChanges > 0 && <SmallBadge color={C.green}>{summary.fteChanges} FTE</SmallBadge>}
+                  {summary.attritionChanges > 0 && <SmallBadge color={'#7c3aed'}>{summary.attritionChanges} attrition</SmallBadge>}
+                  {summary.assumptionChanges > 0 && <SmallBadge color={C.amber}>{summary.assumptionChanges} assumption{summary.assumptionChanges !== 1 ? 's' : ''}</SmallBadge>}
+                </div>
+              )}
+              {summary.totalChanges === 0 && (
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>No overrides yet</div>
+              )}
+              <div style={{ fontSize: 10, color: C.faint, marginTop: 5 }}>
+                {new Date(s.updatedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// EDIT PANEL — 3-tab form
+// ─────────────────────────────────────────────────────────────────────────
+
+const EDIT_TABS = [
+  { id: 'projects',    label: 'Projects' },
+  { id: 'resources',   label: 'Role Overrides (Global)' },
+  { id: 'attrition',   label: 'Attrition Overrides' },
+  { id: 'assumptions', label: 'Assumptions' },
+]
+
+function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
+  const [tab, setTab] = useState('projects')
+  const { editDraft, saveEditDraft, discardEditDraft,
+          patchDraftProject, removeDraftProject,
+          patchDraftResource, patchDraftAssumptions, patchDraftAttrition, editSummary } = sc
+
+  const projects = baselineIngest?.projects || []
+  const nameIsValid = !!(editDraft?.name && String(editDraft.name).trim().length > 0)
+
+  return (
+    <div>
+      {/* Edit header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div style={{ width: '100%' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 12, alignItems: 'end' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 10.5, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 6 }}>
+                Scenario name <span style={{ color: C.red }}>*</span>
+              </div>
+              <input
+                value={editDraft.name || ''}
+                onChange={e => sc.setEditDraft(prev => ({ ...prev, name: e.target.value }))}
+                placeholder="Give this scenario a clear name"
+                style={{
+                  ...inputStyle(),
+                  fontSize: 13.5,
+                  fontWeight: 650,
+                  borderColor: nameIsValid ? C.border : 'rgba(220,38,38,0.55)',
+                  boxShadow: nameIsValid ? 'none' : '0 0 0 3px rgba(220,38,38,0.10)',
+                }}
+              />
+              {!nameIsValid && (
+                <div style={{ fontSize: 11.5, color: C.red, marginTop: 7 }}>
+                  Name is required before you can save and compare.
+                </div>
+              )}
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 10.5, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: 6 }}>
+                Description (optional)
+              </div>
+              <input
+                value={editDraft.description || ''}
+                onChange={e => sc.setEditDraft(prev => ({ ...prev, description: e.target.value }))}
+                placeholder="What decision does this test?"
+                style={inputStyle()}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Change summary pills */}
+      {editSummary && editSummary.totalChanges > 0 && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 11, color: C.muted, alignSelf: 'center' }}>Active overrides:</div>
+          {editSummary.modified > 0    && <Pill type="blue">{editSummary.modified} project{editSummary.modified !== 1 ? 's' : ''} modified</Pill>}
+          {editSummary.excluded > 0    && <Pill type="red">{editSummary.excluded} excluded</Pill>}
+          {editSummary.fteChanges > 0  && <Pill type="green">{editSummary.fteChanges} FTE override{editSummary.fteChanges !== 1 ? 's' : ''}</Pill>}
+          {editSummary.attritionChanges > 0 && <Pill type="purple">{editSummary.attritionChanges} attrition</Pill>}
+          {editSummary.assumptionChanges > 0 && <Pill type="amber">{editSummary.assumptionChanges} assumption{editSummary.assumptionChanges !== 1 ? 's' : ''}</Pill>}
+        </div>
+      )}
+
+      {/* Tab bar */}
+      <div style={{ display: 'flex', borderBottom: `1px solid ${C.border}`, marginBottom: 18 }}>
+        {EDIT_TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: '9px 16px', fontSize: 13, fontWeight: tab === t.id ? 600 : 450,
+            color: tab === t.id ? C.accent : C.muted,
+            borderBottom: `2px solid ${tab === t.id ? C.accent : 'transparent'}`,
+            background: 'none', border: 'none', borderBottomWidth: 2, borderBottomStyle: 'solid',
+            borderBottomColor: tab === t.id ? C.accent : 'transparent',
+            cursor: 'pointer', fontFamily: 'var(--font-sans)', transition: 'all 0.12s',
+          }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      {tab === 'projects'    && (
+        <ProjectOverridesTab
+          projects={projects}
+          overrides={editDraft.projectOverrides}
+          onPatch={patchDraftProject}
+          onRemove={removeDraftProject}
+        />
+      )}
+      {tab === 'resources'   && (
+        <ResourceOverridesTab
+          overrides={editDraft.resourceOverrides}
+          onPatch={patchDraftResource}
+          baselineIngest={baselineIngest}
+          planningYear={planningYear}
+        />
+      )}
+      {tab === 'attrition'   && (
+        <AttritionOverridesTab
+          globalAttrition={editDraft.assumptionOverrides?.attritionFactor}
+          perRole={editDraft.attritionOverrides || {}}
+          onPatchGlobal={(v) => patchDraftAssumptions({ attritionFactor: v })}
+          onPatchRole={(role, v) => patchDraftAttrition(role, v)}
+        />
+      )}
+      {tab === 'assumptions' && (
+        <AssumptionOverridesTab
+          overrides={editDraft.assumptionOverrides}
+          onPatch={patchDraftAssumptions}
+          baselineIngest={baselineIngest}
+          planningYear={planningYear}
+        />
+      )}
+
+      {/* Action bar */}
+      <div style={{ display: 'flex', gap: 10, marginTop: 20, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+        <button
+          onClick={() => nameIsValid && saveEditDraft()}
+          disabled={!nameIsValid}
+          style={{
+            ...btnStyle('primary'),
+            opacity: nameIsValid ? 1 : 0.55,
+            cursor: nameIsValid ? 'pointer' : 'not-allowed',
+          }}
+          title={!nameIsValid ? 'Scenario name is required' : 'Save scenario and compare'}
+        >
+          Save &amp; Compare →
+        </button>
+        <button onClick={discardEditDraft} style={btnStyle('ghost')}>
+          Discard
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PROJECT OVERRIDES TAB
+// ─────────────────────────────────────────────────────────────────────────
+
+function ProjectOverridesTab({ projects, overrides, onPatch, onRemove }) {
+  const [search, setSearch] = useState('')
+  const [showOverridesOnly, setShowOverridesOnly] = useState(false)
+
+  const filtered = useMemo(() => {
+    return projects.filter(p => {
+      if (search && !p.name.toLowerCase().includes(search.toLowerCase())) return false
+      if (showOverridesOnly && !overrides[p.id]) return false
+      return true
+    })
+  }, [projects, search, showOverridesOnly, overrides])
+
+  const overrideCount = Object.keys(overrides).length
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14, lineHeight: 1.6 }}>
+        Override individual project parameters — dates, LMs, VIBE type, or exclude projects entirely.
+        Changes are additive: only what you set is modified.
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, marginBottom: 14, alignItems: 'center' }}>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search projects…"
+          style={inputStyle({ width: 220 })}
+        />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+          <input type="checkbox" checked={showOverridesOnly} onChange={e => setShowOverridesOnly(e.target.checked)} />
+          Show modified only
+        </label>
+        {overrideCount > 0 && (
+          <div style={{ marginLeft: 'auto', fontSize: 11, color: C.accent, fontWeight: 600 }}>
+            {overrideCount} project{overrideCount !== 1 ? 's' : ''} overridden
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 460, overflowY: 'auto' }}>
+        {filtered.map(p => (
+          <ProjectOverrideRow
+            key={p.id}
+            project={p}
+            override={overrides[p.id] || null}
+            onPatch={patch => onPatch(p.id, patch)}
+            onClear={() => onRemove(p.id)}
+          />
+        ))}
+        {filtered.length === 0 && (
+          <div style={{ padding: '30px 0', textAlign: 'center', fontSize: 12, color: C.muted }}>
+            No projects match
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ProjectOverrideRow({ project, override, onPatch, onClear }) {
+  const [open, setOpen] = useState(!!override)
+  const hasOverride = !!override && Object.keys(override).filter(k => override[k] !== undefined && override[k] !== false).length > 0
+  const isExcluded = override?.exclude === true
+
+  const VIBE_COLOR = { Bond: '#2563eb', Validate: '#059669', Integrate: '#dc2626', Explore: '#d97706' }
+
+  return (
+    <div style={{
+      border: `1px solid ${hasOverride ? C.accent : C.border}`,
+      borderRadius: 8,
+      background: isExcluded ? 'var(--red-light)' : (hasOverride ? 'var(--accent-light)' : C.surface),
+      overflow: 'hidden',
+    }}>
+      {/* Row header */}
+      <div
+        onClick={() => setOpen(o => !o)}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', cursor: 'pointer' }}
+      >
+        <span style={{ fontSize: 10, color: C.faint, width: 12, textAlign: 'center' }}>{open ? '▾' : '▸'}</span>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: VIBE_COLOR[project.vibeType] || '#888', flexShrink: 0 }} />
+        <span style={{ flex: 1, fontSize: 12.5, fontWeight: hasOverride ? 600 : 400, color: isExcluded ? C.red : C.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: isExcluded ? 'line-through' : 'none' }}>
+          {project.name}
+        </span>
+        <span style={{ fontSize: 10.5, color: C.muted, flexShrink: 0 }}>{project.vibeType}</span>
+        {hasOverride && !isExcluded && <SmallBadge color={C.accent}>Modified</SmallBadge>}
+        {isExcluded && <SmallBadge color={C.red}>Excluded</SmallBadge>}
+      </div>
+
+      {/* Override form */}
+      {open && (
+        <div style={{ padding: '0 12px 12px', borderTop: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 10 }}>
+          {/* Exclude toggle */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={!!override?.exclude}
+              onChange={e => onPatch({ exclude: e.target.checked })}
+            />
+            <span style={{ fontWeight: 500 }}>Exclude from scenario</span>
+          </label>
+
+          {!isExcluded && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              {/* Date shifts */}
+              <FieldGroup label="Start date shift (days)">
+                <input
+                  type="number"
+                  value={override?.startDateShiftDays ?? ''}
+                  onChange={e => onPatch({ startDateShiftDays: e.target.value ? parseInt(e.target.value) : undefined })}
+                  placeholder="e.g. +30 or -14"
+                  style={inputStyle()}
+                />
+              </FieldGroup>
+              <FieldGroup label="Delivery date shift (days)">
+                <input
+                  type="number"
+                  value={override?.deliveryShiftDays ?? ''}
+                  onChange={e => onPatch({ deliveryShiftDays: e.target.value ? parseInt(e.target.value) : undefined })}
+                  placeholder="e.g. +30 or -14"
+                  style={inputStyle()}
+                />
+              </FieldGroup>
+
+              {/* LMs */}
+              <FieldGroup label={`Total LMs (baseline: ${(project.totalLMs || 0).toLocaleString()})`}>
+                <input
+                  type="number"
+                  value={override?.totalLMs ?? ''}
+                  onChange={e => onPatch({ totalLMs: e.target.value ? parseInt(e.target.value) : undefined })}
+                  placeholder="Override LM count"
+                  style={inputStyle()}
+                />
+              </FieldGroup>
+
+              {/* LM multiplier direct */}
+              <FieldGroup label={`LM multiplier (baseline: ${project.lmMultiplier ?? '—'})`}>
+                <input
+                  type="number"
+                  step="0.05"
+                  value={override?.lmMultiplier ?? ''}
+                  onChange={e => onPatch({ lmMultiplier: e.target.value ? parseFloat(e.target.value) : undefined })}
+                  placeholder="Override multiplier"
+                  style={inputStyle()}
+                />
+              </FieldGroup>
+
+              {/* VIBE type */}
+              <FieldGroup label="VIBE type">
+                <select value={override?.vibeType ?? ''} onChange={e => onPatch({ vibeType: e.target.value || undefined })} style={inputStyle()}>
+                  <option value="">— keep {project.vibeType} —</option>
+                  {VIBE_TYPES.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </FieldGroup>
+
+              {/* Orbit */}
+              <FieldGroup label="Orbit tier">
+                <select value={override?.orbit ?? ''} onChange={e => onPatch({ orbit: e.target.value || undefined })} style={inputStyle()}>
+                  <option value="">— keep {project.orbit || '?'} —</option>
+                  {['A','B','C','D'].map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+              </FieldGroup>
+            </div>
+          )}
+
+          {!isExcluded && (
+            <div style={{ marginTop: 6 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: C.muted, marginBottom: 8 }}>
+                Role Overrides (Assignments)
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <FieldGroup label={`CSM (baseline: ${project.assignedCSM || 'Unassigned'})`}>
+                  <input
+                    value={override?.assignedCSM ?? ''}
+                    onChange={e => onPatch({ assignedCSM: e.target.value === '' ? null : e.target.value })}
+                    placeholder="Type name to override, blank = Unassigned"
+                    style={inputStyle()}
+                  />
+                  {override?.assignedCSM !== undefined && (
+                    <SmallInlineBtn onClick={() => onPatch({ assignedCSM: undefined })}>Clear override</SmallInlineBtn>
+                  )}
+                </FieldGroup>
+                <FieldGroup label={`PM (baseline: ${project.assignedPM || 'Unassigned'})`}>
+                  <input
+                    value={override?.assignedPM ?? ''}
+                    onChange={e => onPatch({ assignedPM: e.target.value === '' ? null : e.target.value })}
+                    placeholder="Type name to override, blank = Unassigned"
+                    style={inputStyle()}
+                  />
+                  {override?.assignedPM !== undefined && (
+                    <SmallInlineBtn onClick={() => onPatch({ assignedPM: undefined })}>Clear override</SmallInlineBtn>
+                  )}
+                </FieldGroup>
+                <FieldGroup label={`Analyst 1 (baseline: ${project.assignedAnalyst1 || 'Unassigned'})`}>
+                  <input
+                    value={override?.assignedAnalyst1 ?? ''}
+                    onChange={e => onPatch({ assignedAnalyst1: e.target.value === '' ? null : e.target.value })}
+                    placeholder="Type name to override, blank = Unassigned"
+                    style={inputStyle()}
+                  />
+                  {override?.assignedAnalyst1 !== undefined && (
+                    <SmallInlineBtn onClick={() => onPatch({ assignedAnalyst1: undefined })}>Clear override</SmallInlineBtn>
+                  )}
+                </FieldGroup>
+                <FieldGroup label={`Analyst 2 (baseline: ${project.assignedAnalyst2 || 'Unassigned'})`}>
+                  <input
+                    value={override?.assignedAnalyst2 ?? ''}
+                    onChange={e => onPatch({ assignedAnalyst2: e.target.value === '' ? null : e.target.value })}
+                    placeholder="Type name to override, blank = Unassigned"
+                    style={inputStyle()}
+                  />
+                  {override?.assignedAnalyst2 !== undefined && (
+                    <SmallInlineBtn onClick={() => onPatch({ assignedAnalyst2: undefined })}>Clear override</SmallInlineBtn>
+                  )}
+                </FieldGroup>
+                <FieldGroup label={`SE (baseline: ${project.assignedSE || 'Unassigned'})`}>
+                  <input
+                    value={override?.assignedSE ?? ''}
+                    onChange={e => onPatch({ assignedSE: e.target.value === '' ? null : e.target.value })}
+                    placeholder="Type name to override, blank = Unassigned"
+                    style={inputStyle()}
+                  />
+                  {override?.assignedSE !== undefined && (
+                    <SmallInlineBtn onClick={() => onPatch({ assignedSE: undefined })}>Clear override</SmallInlineBtn>
+                  )}
+                </FieldGroup>
+                <FieldGroup label={`Analyst 1 load % (baseline: ${Number.isFinite(+project.analystUtilPct) ? project.analystUtilPct : '—'})`}>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={override?.analystUtilPct ?? ''}
+                    onChange={e => onPatch({ analystUtilPct: e.target.value === '' ? undefined : parseFloat(e.target.value) })}
+                    placeholder="0–100"
+                    style={inputStyle()}
+                  />
+                </FieldGroup>
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.5 }}>
+                These overrides affect <strong>People Utilization</strong> and <strong>Unstaffed demand</strong> views. They do not change total demand hours.
+              </div>
+            </div>
+          )}
+
+          {hasOverride && (
+            <button onClick={onClear} style={{ alignSelf: 'flex-start', ...btnStyle('danger-sm') }}>
+              Clear overrides
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// RESOURCE OVERRIDES TAB
+// ─────────────────────────────────────────────────────────────────────────
+
+function ResourceOverridesTab({ overrides, onPatch, baselineIngest, planningYear = 2026 }) {
+  // Analyst is a single override role in the Scenario layer.
+  // Internally, capacity is driven by `Analyst 1` headcount.
+  const roles = ['CSM', 'PM', 'Analyst', 'SE']
+  const baselineCfg = useMemo(
+    () => buildScenarioCapacityConfig({ roster: baselineIngest?.roster || [], planningYear }),
+    [baselineIngest, planningYear]
+  )
+  const avgHrsPerPersonMo = useMemo(() => {
+    const arr = baselineCfg?.hrsPerPersonMonthByMonth
+    if (!Array.isArray(arr) || arr.length !== 12) return HRS_PER_PERSON_MONTH
+    return arr.reduce((a, b) => a + (b || 0), 0) / 12
+  }, [baselineCfg])
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14, lineHeight: 1.6 }}>
+        Override FTE headcount per role. Changes affect effective capacity across the year
+        and shift the breach thresholds visible in the Compare view.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {roles.map(role => {
+          const internalRole = role === 'Analyst' ? 'Analyst 1' : role
+          const baseline = baselineCfg?.fteCount?.[internalRole] ?? 0
+          const override = overrides[internalRole]?.fteOverride
+          const hasOverride = override !== undefined && override !== null
+          const effective = hasOverride ? override : baseline
+
+          return (
+            <div key={role} style={{
+              display: 'flex', alignItems: 'center', gap: 14,
+              padding: '12px 16px', borderRadius: 8,
+              border: `1px solid ${hasOverride ? C.accent : C.border}`,
+              background: hasOverride ? 'var(--accent-light)' : C.surface,
+            }}>
+              <div style={{ width: 80, fontWeight: 600, fontSize: 13, color: C.ink }}>{role}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 11.5, color: C.muted }}>Baseline:</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: C.ink }}>{baseline} FTE</span>
+                  <span style={{ fontSize: 11, color: C.faint }}>= {(baseline * avgHrsPerPersonMo).toLocaleString()} hrs/mo (avg)</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+                  <span style={{ fontSize: 11.5, color: C.muted }}>Scenario FTE:</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={override ?? ''}
+                    onChange={e => onPatch(internalRole, { fteOverride: e.target.value !== '' ? parseInt(e.target.value) : undefined })}
+                    placeholder={String(baseline)}
+                    style={{ ...inputStyle(), width: 70 }}
+                  />
+                  {hasOverride && (
+                    <>
+                      <span style={{ fontSize: 11, color: override > baseline ? C.green : C.red, fontWeight: 600 }}>
+                        {override > baseline ? '+' : ''}{override - baseline} FTE
+                      </span>
+                      <span style={{ fontSize: 11, color: C.faint }}>
+                        = {(effective * avgHrsPerPersonMo).toLocaleString()} hrs/mo (avg)
+                      </span>
+                      <button onClick={() => onPatch(internalRole, { fteOverride: undefined })} style={btnStyle('danger-sm')}>
+                        Clear
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ASSUMPTION OVERRIDES TAB
+// ─────────────────────────────────────────────────────────────────────────
+
+function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYear = 2026 }) {
+  const baselineCfg = useMemo(
+    () => buildScenarioCapacityConfig({ roster: baselineIngest?.roster || [], planningYear }),
+    [baselineIngest, planningYear]
+  )
+  const baselineAvgHrsPerPersonMo = useMemo(() => {
+    const arr = baselineCfg?.hrsPerPersonMonthByMonth
+    if (!Array.isArray(arr) || arr.length !== 12) return HRS_PER_PERSON_MONTH
+    return arr.reduce((a, b) => a + (b || 0), 0) / 12
+  }, [baselineCfg])
+
+  const fields = [
+    {
+      key: 'hrsPerPersonMonth',
+      label: 'Working hours per person per month',
+      desc: 'Baseline is calendar-aware (business-days × 10 hrs/day) and varies by month. This override sets a constant hours/month for all months.',
+      baseline: baselineAvgHrsPerPersonMo,
+      step: 8, min: 80, max: 200,
+      format: v => `${v}h`,
+    },
+  ]
+
+  // ── Assumption tables (scenario-only) ───────────────────────────────
+  const lmBucketsEffective = useMemo(() => {
+    if (Array.isArray(overrides?.lmBucketMultipliers) && overrides.lmBucketMultipliers.length > 0) {
+      return overrides.lmBucketMultipliers
+    }
+    return LM_BUCKET_MULTIPLIERS
+  }, [overrides])
+
+  const orbitBaseline = baselineIngest?.orbitMultipliers || {}
+  const orbitOverrides = overrides?.orbitVibeMultipliers || {}
+  const getOrbitBaselineVal = (vibe, orbit) => {
+    const key = `${vibe}__${orbit}`
+    if (orbitBaseline[key] !== undefined && orbitBaseline[key] !== null) return orbitBaseline[key]
+    // Fallback to schema table (keyed `${orbit}_${vibe}`)
+    const k2 = `${orbit}_${vibe}`
+    return ORBIT_VIBE_MULTIPLIERS[k2] ?? 0
+  }
+  const getOrbitEffectiveVal = (vibe, orbit) => {
+    const key = `${vibe}__${orbit}`
+    const ov = orbitOverrides[key]
+    if (ov !== undefined && ov !== null && ov !== '') return parseFloat(ov)
+    return getOrbitBaselineVal(vibe, orbit)
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14, lineHeight: 1.6 }}>
+        Tune the planning constants that underpin all capacity calculations.
+        These affect the entire team, not individual projects.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {fields.map(f => {
+          const current = overrides[f.key]
+          const hasOverride = current !== undefined && current !== null
+          const displayVal = hasOverride ? current : f.baseline
+
+          return (
+            <div key={f.key} style={{
+              padding: '14px 16px', borderRadius: 8,
+              border: `1px solid ${hasOverride ? C.accent : C.border}`,
+              background: hasOverride ? 'var(--accent-light)' : C.surface,
+            }}>
+              <div style={{ fontWeight: 600, fontSize: 13, color: C.ink, marginBottom: 3 }}>{f.label}</div>
+              <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10, lineHeight: 1.5 }}>{f.desc}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <input
+                  type="range"
+                  min={f.min} max={f.max} step={f.step}
+                  value={displayVal}
+                  onChange={e => onPatch({ [f.key]: parseFloat(e.target.value) })}
+                  style={{ flex: 1, accentColor: 'var(--accent)' }}
+                />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, width: 48, color: hasOverride ? C.accent : C.ink }}>
+                  {f.format(displayVal)}
+                </span>
+                {hasOverride && (
+                  <span style={{ fontSize: 11, color: C.muted }}>
+                    baseline: {f.format(f.baseline)}
+                  </span>
+                )}
+              </div>
+              {hasOverride && (
+                <button onClick={() => onPatch({ [f.key]: undefined })} style={{ ...btnStyle('danger-sm'), marginTop: 8 }}>
+                  Reset to baseline
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* LM Bucket multipliers */}
+      <Card style={{ marginTop: 14 }}>
+        <CardHeader title="LM Bucket multipliers (scenario-only)">
+          <Tag>Impacts demand hours</Tag>
+        </CardHeader>
+        <CardBody>
+          <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+            Adjust how <strong>Total LMs</strong> map to <strong>LM multipliers</strong>. This affects projects whose LM multiplier appears to be bucket-derived (explicit file multipliers are preserved).
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: 'var(--surface-1)' }}>
+                  {['LMs ≤', 'Baseline', 'Scenario'].map(h => (
+                    <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {LM_BUCKET_MULTIPLIERS.map((tier, i) => {
+                  const eff = lmBucketsEffective?.[i]?.multiplier ?? tier.multiplier
+                  const isChanged = eff !== tier.multiplier
+                  return (
+                    <tr key={tier.maxLMs} style={{ background: i % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)' }}>{tier.maxLMs.toLocaleString()}</td>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: C.muted }}>{tier.multiplier.toFixed(2)}×</td>
+                      <td style={{ padding: '8px 12px' }}>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={eff}
+                          onChange={e => {
+                            const next = LM_BUCKET_MULTIPLIERS.map((t, idx) => ({
+                              ...t,
+                              multiplier: idx === i ? parseFloat(e.target.value || t.multiplier) : (lmBucketsEffective?.[idx]?.multiplier ?? t.multiplier),
+                            }))
+                            onPatch({ lmBucketMultipliers: next })
+                          }}
+                          style={{
+                            ...inputStyle({ width: 110 }),
+                            fontFamily: 'var(--font-mono)',
+                            borderColor: isChanged ? 'rgba(167,139,250,0.55)' : C.border,
+                          }}
+                        />
+                        <span style={{ marginLeft: 6, fontSize: 11.5, color: isChanged ? C.accent : C.faint }}>
+                          {isChanged ? 'overridden' : 'baseline'}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {Array.isArray(overrides?.lmBucketMultipliers) && (
+            <button
+              onClick={() => onPatch({ lmBucketMultipliers: undefined })}
+              style={{ ...btnStyle('danger-sm'), marginTop: 10 }}
+            >
+              Reset LM bucket table
+            </button>
+          )}
+        </CardBody>
+      </Card>
+
+      {/* Orbit × VIBE final multipliers */}
+      <Card style={{ marginTop: 14 }}>
+        <CardHeader title="Orbit × VIBE final multipliers (CSM only)">
+          <Tag>Scenario-only</Tag>
+        </CardHeader>
+        <CardBody>
+          <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+            Overrides the <strong>CSM</strong> orbit multiplier lookup used in final utilized hours. Baseline values come from the uploaded workbook’s Demand Matrix (when available).
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: 'var(--surface-1)' }}>
+                  <th style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                    VIBE \ Orbit
+                  </th>
+                  {['A','B','C','D'].map(o => (
+                    <th key={o} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                      {o}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {VIBE_TYPES.map((v, rIdx) => (
+                  <tr key={v} style={{ background: rIdx % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
+                    <td style={{ padding: '8px 12px', fontWeight: 650, color: C.ink }}>{v}</td>
+                    {['A','B','C','D'].map(o => {
+                      const k = `${v}__${o}`
+                      const baseVal = getOrbitBaselineVal(v, o)
+                      const has = orbitOverrides[k] !== undefined && orbitOverrides[k] !== null
+                      const eff = getOrbitEffectiveVal(v, o)
+                      return (
+                        <td key={k} style={{ padding: '8px 12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input
+                              type="number"
+                              step="0.05"
+                              value={has ? orbitOverrides[k] : ''}
+                              onChange={e => {
+                                const val = e.target.value
+                                const next = { ...(orbitOverrides || {}) }
+                                if (val === '') delete next[k]
+                                else next[k] = parseFloat(val)
+                                onPatch({ orbitVibeMultipliers: Object.keys(next).length ? next : undefined })
+                              }}
+                              placeholder={String(baseVal || 0)}
+                              style={{
+                                ...inputStyle({ width: 92 }),
+                                fontFamily: 'var(--font-mono)',
+                                borderColor: has ? 'rgba(167,139,250,0.55)' : C.border,
+                              }}
+                              title={`Baseline ${baseVal}× · Effective ${eff}×`}
+                            />
+                            <span style={{ fontSize: 11, color: has ? C.accent : C.faint }}>
+                              {has ? 'override' : 'base'}
+                            </span>
+                          </div>
+                        </td>
+                      )
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {overrides?.orbitVibeMultipliers && (
+            <button
+              onClick={() => onPatch({ orbitVibeMultipliers: undefined })}
+              style={{ ...btnStyle('danger-sm'), marginTop: 10 }}
+            >
+              Reset Orbit × VIBE overrides
+            </button>
+          )}
+        </CardBody>
+      </Card>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ATTRITION OVERRIDES TAB (capacity-only)
+// ─────────────────────────────────────────────────────────────────────────
+
+function AttritionOverridesTab({ globalAttrition, perRole, onPatchGlobal, onPatchRole }) {
+  // Analyst is a single override role in the Scenario layer; stored under `Analyst 1`.
+  const roles = ['CSM', 'PM', 'Analyst', 'SE']
+  const global = (globalAttrition !== undefined && globalAttrition !== null) ? globalAttrition : ATTRITION_FACTOR
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14, lineHeight: 1.6 }}>
+        Attrition is a capacity-only lever. Set a global availability baseline, then override specific roles where needed.
+      </div>
+
+      <Card style={{ marginBottom: 14 }}>
+        <CardHeader title="Global attrition baseline" tag="Capacity">
+          <Tag>{`${(global * 100).toFixed(0)}%`}</Tag>
+        </CardHeader>
+        <CardBody>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <input
+              type="range"
+              min={0.5}
+              max={1.0}
+              step={0.01}
+              value={global}
+              onChange={e => onPatchGlobal(parseFloat(e.target.value))}
+              style={{ flex: 1, accentColor: 'var(--accent)' }}
+            />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: C.accent, width: 58 }}>
+              {(global * 100).toFixed(0)}%
+            </span>
+            {(globalAttrition !== undefined && globalAttrition !== null) && (
+              <button onClick={() => onPatchGlobal(undefined)} style={btnStyle('danger-sm')}>
+                Reset
+              </button>
+            )}
+          </div>
+          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8 }}>
+            Baseline is {(ATTRITION_FACTOR * 100).toFixed(0)}%. This value is used unless a role override is set below.
+          </div>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader title="Role-level attrition overrides" tag="By Role" />
+        <CardBody>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {roles.map(role => {
+              const internalRole = role === 'Analyst' ? 'Analyst 1' : role
+              const override = perRole?.[internalRole]
+              const has = override !== undefined && override !== null
+              const effective = has ? override : global
+              return (
+                <div key={role} style={{
+                  padding: '12px 14px',
+                  borderRadius: 10,
+                  border: `1px solid ${has ? 'rgba(167,139,250,0.55)' : C.border}`,
+                  background: has ? 'var(--accent-light)' : C.surface,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+                    <div style={{ width: 90, fontWeight: 700, fontSize: 13, color: C.ink }}>{role}</div>
+                    <div style={{ fontSize: 11.5, color: C.muted }}>
+                      Effective:{' '}
+                      <strong style={{ color: has ? C.accent : C.ink }}>
+                        {(effective * 100).toFixed(0)}%
+                      </strong>
+                      {!has && <span style={{ color: C.faint }}> (global)</span>}
+                    </div>
+                    {has && (
+                      <button onClick={() => onPatchRole(internalRole, undefined)} style={{ marginLeft: 'auto', ...btnStyle('danger-sm') }}>
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={1.0}
+                    step={0.01}
+                    value={effective}
+                    onChange={e => onPatchRole(internalRole, parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: 'var(--accent)' }}
+                  />
+                </div>
+              )
+            })}
+          </div>
+        </CardBody>
+      </Card>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// COMPARE PANEL
+// ─────────────────────────────────────────────────────────────────────────
+
+function ComparePanel({ sc, baselineCalc }) {
+  const { activeScenario, scenarioCalc, scenarioCap, calcLoading, calcError, diff, activeSummary, editScenario } = sc
+  // Scenarios always show Analyst demand as A1 + A2 total (consistent with Overview).
+  // Capacity remains tied to Analyst 1 (Analyst 2 is incremental demand pressure).
+  const includeAnalyst2 = true
+
+  // Hooks must remain unconditional — compute baseline capacity config up front
+  const planningYear = baselineCalc?.meta?.planningYear || 2026
+  const baselineConfig = useMemo(
+    () => buildScenarioCapacityConfig({ roster: sc?.baselineIngest?.roster || [], planningYear }),
+    [sc?.baselineIngest, planningYear]
+  )
+  const baselineCap = useMemo(
+    () => computeCapacityScenario(baselineConfig),
+    [baselineConfig]
+  )
+
+  if (calcLoading) return <LoadingState msg="Running scenario calculation…" />
+  if (calcError)   return <ErrorState msg={calcError} />
+  if (!scenarioCalc) return (
+    <div style={{ padding: '40px 0', textAlign: 'center', color: C.muted, fontSize: 13 }}>
+      Waiting for scenario to calculate…
+    </div>
+  )
+  if (!baselineCalc) return (
+    <div style={{ padding: '40px 0', textAlign: 'center', color: C.muted, fontSize: 13 }}>
+      <div style={{ marginBottom: 8 }}>Loading baseline engine calculation…</div>
+      <div style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite', margin: '0 auto' }} />
+    </div>
+  )
+
+  const analystAnnual = (calc, which) => {
+    const model = calc?.analystModel
+    if (model?.annualDemand?.[which] !== undefined && model?.annualDemand?.[which] !== null) return model.annualDemand[which]
+    const base = calc?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)
+    const inc = calc?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)
+    const total = base.map((v, i) => v + (inc[i] || 0))
+    const pick = which === 'total' ? total : which === 'incremental' ? inc : base
+    return pick.reduce((a, b) => a + (b || 0), 0)
+  }
+
+  const analystMonthsOver = (calc, cap, which) => {
+    const effArr = cap?.['Analyst 1']?.effectiveMonthlyByMonth || new Array(12).fill(cap?.['Analyst 1']?.effectiveMonthly || 0)
+    const model = calc?.analystModel
+    if (model?.monthsOverEffective?.[which] !== undefined && model?.monthsOverEffective?.[which] !== null) return model.monthsOverEffective[which]
+    const base = calc?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)
+    const inc = calc?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)
+    const total = base.map((v, i) => v + (inc[i] || 0))
+    const pick = which === 'total' ? total : base
+    return pick.filter((d, i) => d > (effArr[i] || 0)).length
+  }
+
+  return (
+    <div>
+      {/* Scenario header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 17, color: C.ink }}>{activeScenario.name || 'Untitled scenario'}</div>
+          {activeScenario.description && (
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>{activeScenario.description}</div>
+          )}
+        </div>
+        <button onClick={() => editScenario(activeScenario.id)} style={btnStyle('ghost')}>
+          ✎ Edit overrides
+        </button>
+      </div>
+
+      {/* Change pills */}
+      {activeSummary && activeSummary.totalChanges > 0 && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 11, color: C.muted, alignSelf: 'center' }}>Overrides active:</div>
+          {activeSummary.modified > 0    && <Pill type="blue">{activeSummary.modified} project{activeSummary.modified !== 1 ? 's' : ''}</Pill>}
+          {activeSummary.excluded > 0    && <Pill type="red">{activeSummary.excluded} excluded</Pill>}
+          {activeSummary.fteChanges > 0  && <Pill type="green">{activeSummary.fteChanges} FTE changed</Pill>}
+          {activeSummary.attritionChanges > 0 && <Pill type="purple">{activeSummary.attritionChanges} attrition</Pill>}
+          {activeSummary.assumptionChanges > 0 && <Pill type="amber">{activeSummary.assumptionChanges} assumption{activeSummary.assumptionChanges !== 1 ? 's' : ''}</Pill>}
+        </div>
+      )}
+
+      {/* KPI cards (required) */}
+      {(() => {
+        const demandSeries = (calc, role) => {
+          if (role !== 'Analyst') return calc?.demandByRole?.[role] || new Array(12).fill(0)
+          const base = calc?.analystModel?.demandBase || calc?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)
+          const inc = calc?.analystModel?.demandIncremental || calc?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)
+          const tot = calc?.analystModel?.demandTotal || base.map((v, i) => (v || 0) + (inc[i] || 0))
+          return tot
+        }
+        const effCapSeries = (cap, role) => {
+          const key = role === 'Analyst' ? 'Analyst 1' : role
+          return cap?.[key]?.effectiveMonthlyByMonth || new Array(12).fill(cap?.[key]?.effectiveMonthly || 0)
+        }
+        const sum = (arr) => (arr || []).reduce((a, b) => a + (b || 0), 0)
+        const monthsOverSeries = (dem, cap) => (dem || []).filter((d, i) => (d || 0) > (cap?.[i] || 0)).length
+        const utilPct = (dem, cap) => {
+          const denom = sum(cap)
+          if (!denom) return '—'
+          return `${((sum(dem) / denom) * 100).toFixed(0)}%`
+        }
+        const peakMonth = (arr) => {
+          const safe = Array.isArray(arr) && arr.length ? arr : new Array(12).fill(0)
+          const maxVal = Math.max(...safe.map(v => v || 0))
+          const maxIdx = safe.findIndex(v => (v || 0) === maxVal)
+          return MONTHS[maxIdx < 0 ? 0 : maxIdx] || '—'
+        }
+
+        const roles = ['CSM', 'PM', 'Analyst']
+        return (
+          <KpiStrip cols={3}>
+            {roles.map(role => {
+              const bDem = demandSeries(baselineCalc, role)
+              const sDem = demandSeries(scenarioCalc, role)
+              const bCap = effCapSeries(baselineCap, role)
+              const sCap = effCapSeries(scenarioCap, role)
+
+              const bMonths = monthsOverSeries(bDem, bCap)
+              const sMonths = monthsOverSeries(sDem, sCap)
+              const deltaMonths = sMonths - bMonths
+
+              const badge = `${sMonths} months over` + (deltaMonths === 0 ? '' : ` (${deltaMonths > 0 ? '+' : ''}${deltaMonths})`)
+              const sub = `${Math.round(sum(sDem)).toLocaleString()}h/yr · Peak: ${peakMonth(sDem)}`
+              const accent = role === 'CSM' ? 'red' : role === 'PM' ? 'amber' : 'amber'
+
+              return (
+                <KpiCard
+                  key={role}
+                  label={role === 'Analyst' ? 'Analyst Utilization (A1+A2)' : `${role} Utilization`}
+                  value={utilPct(sDem, sCap)}
+                  sub={sub}
+                  badge={badge}
+                  badgeType={sMonths > 0 ? 'red' : 'green'}
+                  accent={accent}
+                />
+              )
+            })}
+          </KpiStrip>
+        )
+      })()}
+
+      {/* Analyst incremental demand pressure (required) */}
+      {scenarioCalc?.analystModel && (
+        <Card style={{ marginBottom: 16 }}>
+          <CardHeader title="Analyst incremental demand pressure">
+            <Tag>Analyst 1 capacity · Analyst 2 incremental demand</Tag>
+          </CardHeader>
+          <CardBody>
+            {(() => {
+              const base = scenarioCalc.analystModel?.demandBase || new Array(12).fill(0)
+              const inc = scenarioCalc.analystModel?.demandIncremental || new Array(12).fill(0)
+              const tot = scenarioCalc.analystModel?.demandTotal || base.map((v, i) => v + (inc[i] || 0))
+              const effArr = scenarioCap?.['Analyst 1']?.effectiveMonthlyByMonth || new Array(12).fill(scenarioCap?.['Analyst 1']?.effectiveMonthly || 0)
+              const hrsArr = scenarioCap?.['Analyst 1']?.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+
+              const peakTot = Math.max(...tot)
+              const peakIdx = tot.indexOf(peakTot)
+              const effAtPeak = effArr[peakIdx] || 0
+              const extraHrs = Math.max(0, peakTot - effAtPeak)
+              const denom = hrsArr[peakIdx] || 0
+              const extraFte = denom ? (extraHrs / denom) : 0
+
+              const ann = (arr) => arr.reduce((a, b) => a + (b || 0), 0)
+              const annBase = ann(base)
+              const annInc = ann(inc)
+              const annTot = ann(tot)
+
+              return (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+                  <div style={miniKpi()}>
+                    <div style={miniLabel()}>Base demand (A1)</div>
+                    <div style={miniVal()}>{Math.round(annBase).toLocaleString()}h/yr</div>
+                  </div>
+                  <div style={miniKpi()}>
+                    <div style={miniLabel()}>Incremental demand (A2)</div>
+                    <div style={miniVal()}>{Math.round(annInc).toLocaleString()}h/yr</div>
+                  </div>
+                  <div style={miniKpi()}>
+                    <div style={miniLabel()}>Total demand (A1+A2)</div>
+                    <div style={miniVal()}>{Math.round(annTot).toLocaleString()}h/yr</div>
+                  </div>
+                  <div style={miniKpi()}>
+                    <div style={miniLabel()}>Peak month extra FTE needed</div>
+                    <div style={miniVal()}>
+                      {extraHrs === 0 ? '—' : `+${extraFte.toFixed(1)} FTE`}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
+                      Peak: {MONTHS[peakIdx] || '—'} · {Math.round(peakTot).toLocaleString()}h vs {Math.round(effAtPeak).toLocaleString()}h eff cap/mo
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.55 }}>
+              This models whether current <strong>Analyst 1</strong> capacity can absorb incremental <strong>Analyst 2</strong> demand. Add Analyst FTE overrides to increase capacity.
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      <ScenarioCapacityDemandChart
+        baseline={baselineCalc}
+        scenario={scenarioCalc}
+        baselineCap={baselineCap}
+        scenarioCap={scenarioCap}
+        includeAnalyst2={includeAnalyst2}
+      />
+
+      {/* Monthly demand delta chart — inline bar chart per role */}
+      <Card style={{ marginBottom: 16 }}>
+        <CardHeader title="Monthly Demand: Baseline vs Scenario">
+          <Tag>All primary roles</Tag>
+        </CardHeader>
+        <CardBody style={{ overflowX: 'auto' }}>
+          <MonthlyDeltaTable
+            baseline={baselineCalc}
+            scenario={scenarioCalc}
+            baselineCap={baselineCap}
+            scenarioCap={scenarioCap}
+            diff={diff}
+            includeAnalyst2={includeAnalyst2}
+          />
+        </CardBody>
+      </Card>
+
+      {/* Role-level capacity table */}
+      <Card>
+        <CardHeader title="Capacity Configuration: Baseline vs Scenario">
+          <Tag>FTE & effective hours</Tag>
+        </CardHeader>
+        <CardBody style={{ padding: 0 }}>
+          <CapacityCompareTable baselineCap={baselineCap} scenarioCap={scenarioCap} />
+        </CardBody>
+      </Card>
+    </div>
+  )
+}
+
+function CapacityRiskImpact({ baseline, scenario, baselineCap, scenarioCap, includeAnalyst2 }) {
+  const roles = ['CSM', 'PM', 'Analyst']
+
+  const summarizeRole = (role) => {
+    const isAnalyst = role === 'Analyst'
+
+    const bBase = isAnalyst
+      ? (baseline?.analystModel?.demandBase || baseline?.demandByRole?.['Analyst 1'] || new Array(12).fill(0))
+      : null
+    const bInc = isAnalyst
+      ? (baseline?.analystModel?.demandIncremental || baseline?.demandByRole?.['Analyst 2'] || new Array(12).fill(0))
+      : null
+    const bTot = isAnalyst
+      ? (baseline?.analystModel?.demandTotal || (bBase || new Array(12).fill(0)).map((v, i) => v + ((bInc || [])[i] || 0)))
+      : null
+
+    const sBase = isAnalyst
+      ? (scenario?.analystModel?.demandBase || scenario?.demandByRole?.['Analyst 1'] || new Array(12).fill(0))
+      : null
+    const sInc = isAnalyst
+      ? (scenario?.analystModel?.demandIncremental || scenario?.demandByRole?.['Analyst 2'] || new Array(12).fill(0))
+      : null
+    const sTot = isAnalyst
+      ? (scenario?.analystModel?.demandTotal || (sBase || new Array(12).fill(0)).map((v, i) => v + ((sInc || [])[i] || 0)))
+      : null
+
+    const bArr = isAnalyst
+      ? (includeAnalyst2 ? bTot : bBase)
+      : (baseline?.demandByRole?.[role] || new Array(12).fill(0))
+    const sArr = isAnalyst
+      ? (includeAnalyst2 ? sTot : sBase)
+      : (scenario?.demandByRole?.[role] || new Array(12).fill(0))
+
+    const capKey = isAnalyst ? 'Analyst 1' : role
+    const bEffArr = baselineCap?.[capKey]?.effectiveMonthlyByMonth || new Array(12).fill(baselineCap?.[capKey]?.effectiveMonthly || 0)
+    const sEffArr = scenarioCap?.[capKey]?.effectiveMonthlyByMonth || new Array(12).fill(scenarioCap?.[capKey]?.effectiveMonthly || (bEffArr[0] || 0))
+
+    const bBreach = bArr.map((v, i) => v > (bEffArr[i] || 0))
+    const sBreach = sArr.map((v, i) => v > (sEffArr[i] || 0))
+
+    const resolvedIdx = MONTHS.map((_, i) => (bBreach[i] && !sBreach[i]) ? i : -1).filter(i => i !== -1)
+    const introducedIdx = MONTHS.map((_, i) => (!bBreach[i] && sBreach[i]) ? i : -1).filter(i => i !== -1)
+
+    const pick = (idxs, n = 3) => idxs.slice(0, n).map(i => MONTHS[i]).join(', ')
+
+    const bCount = bBreach.filter(Boolean).length
+    const sCount = sBreach.filter(Boolean).length
+
+    const ann = (arr) => arr.reduce((a, b) => a + (b || 0), 0)
+    const demandDeltaAnn = ann(sArr) - ann(bArr)
+    const effCapDelta = (scenarioCap?.[capKey]?.effectiveMonthly || 0) - (baselineCap?.[capKey]?.effectiveMonthly || 0)
+
+    return {
+      role,
+      bCount,
+      sCount,
+      deltaCount: sCount - bCount,
+      resolved: resolvedIdx.length,
+      introduced: introducedIdx.length,
+      resolvedMonths: resolvedIdx.length ? pick(resolvedIdx) : '',
+      introducedMonths: introducedIdx.length ? pick(introducedIdx) : '',
+      demandDeltaAnn,
+      effCapDelta,
+    }
+  }
+
+  const summaries = roles.map(summarizeRole)
+  const totalResolved = summaries.reduce((s, r) => s + r.resolved, 0)
+  const totalIntroduced = summaries.reduce((s, r) => s + r.introduced, 0)
+
+  // Pick “headline” role: largest absolute change in breach months (then demand delta)
+  const headline = [...summaries].sort((a, b) =>
+    Math.abs(b.deltaCount) - Math.abs(a.deltaCount) ||
+    Math.abs(b.demandDeltaAnn) - Math.abs(a.demandDeltaAnn)
+  )[0]
+
+  const headlineText = headline
+    ? `${headline.role}: ${headline.bCount} → ${headline.sCount} months over effective cap` +
+      (headline.deltaCount === 0 ? '' : ` (${headline.deltaCount > 0 ? '+' : ''}${headline.deltaCount})`)
+    : ''
+
+  const tone = totalIntroduced > totalResolved ? 'amber' : 'blue'
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <AlertBar type={tone}>
+        <strong>Capacity risk impact:</strong>{' '}
+        {headlineText || 'Baseline vs scenario breach changes by role.'}
+        {' '}
+        {totalResolved > 0 && <><strong style={{ color: 'var(--green)' }}>{totalResolved}</strong> breach-month{totalResolved !== 1 ? 's' : ''} resolved</>}
+        {totalResolved > 0 && totalIntroduced > 0 && <> · </>}
+        {totalIntroduced > 0 && <><strong style={{ color: 'var(--amber)' }}>{totalIntroduced}</strong> introduced</>}
+        {totalResolved === 0 && totalIntroduced === 0 && <>No breach-month changes.</>}
+      </AlertBar>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        {summaries.map(r => {
+          const color =
+            r.deltaCount < 0 ? 'var(--green)' :
+            r.deltaCount > 0 ? 'var(--red)' :
+            C.faint
+          return (
+            <div
+              key={r.role}
+              style={{
+                background: C.surface,
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                padding: '12px 14px',
+                boxShadow: 'var(--shadow-sm)',
+                borderLeft: `3px solid ${color === C.faint ? 'var(--border)' : color}`,
+              }}
+            >
+              <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.7px', color: C.muted, marginBottom: 6 }}>
+                {r.role}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span style={{ fontFamily: 'var(--font-serif)', fontSize: 18, color: C.ink }}>
+                  {r.sCount}
+                </span>
+                <span style={{ fontSize: 11.5, color: C.muted }}>
+                  mo over cap
+                  <span style={{ marginLeft: 6, fontWeight: 800, color }}>
+                    {r.deltaCount === 0 ? '—' : `${r.deltaCount > 0 ? '+' : ''}${r.deltaCount}`}
+                  </span>
+                </span>
+              </div>
+
+              <div style={{ fontSize: 11.5, color: C.muted, marginTop: 6, lineHeight: 1.45 }}>
+                Eff. cap Δ:{' '}
+                <strong style={{ color: r.effCapDelta < 0 ? 'var(--red)' : r.effCapDelta > 0 ? 'var(--green)' : C.faint }}>
+                  {r.effCapDelta === 0 ? '—' : `${r.effCapDelta > 0 ? '+' : ''}${Math.round(r.effCapDelta).toLocaleString()}h/mo`}
+                </strong>
+                <br />
+                Demand Δ:{' '}
+                <strong style={{ color: r.demandDeltaAnn < 0 ? 'var(--green)' : r.demandDeltaAnn > 0 ? 'var(--red)' : C.faint }}>
+                  {r.demandDeltaAnn === 0 ? '—' : `${r.demandDeltaAnn > 0 ? '+' : ''}${Math.round(r.demandDeltaAnn).toLocaleString()}h/yr`}
+                </strong>
+              </div>
+
+              {(r.resolvedMonths || r.introducedMonths) && (
+                <div style={{ fontSize: 10.5, color: C.faint, marginTop: 8, lineHeight: 1.45 }}>
+                  {r.resolvedMonths && (
+                    <div>
+                      Resolved: <strong style={{ color: 'var(--green)' }}>{r.resolvedMonths}</strong>
+                    </div>
+                  )}
+                  {r.introducedMonths && (
+                    <div>
+                      Introduced: <strong style={{ color: 'var(--amber)' }}>{r.introducedMonths}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ScenarioCapacityDemandChart({ baseline, scenario, baselineCap, scenarioCap, includeAnalyst2 }) {
+  const [role, setRole] = useState('CSM')
+  const chartRef = useRef(null)
+
+  const isAnalyst = role === 'Analyst'
+
+  const bA1 = isAnalyst ? (baseline?.analystModel?.demandBase || baseline?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)) : null
+  const bA2 = isAnalyst ? (baseline?.analystModel?.demandIncremental || baseline?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)) : null
+  const bTot = isAnalyst ? (baseline?.analystModel?.demandTotal || (bA1 || new Array(12).fill(0)).map((v, i) => v + ((bA2 || [])[i] || 0))) : null
+
+  const sA1 = isAnalyst ? (scenario?.analystModel?.demandBase || scenario?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)) : null
+  const sA2 = isAnalyst ? (scenario?.analystModel?.demandIncremental || scenario?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)) : null
+  const sTot = isAnalyst ? (scenario?.analystModel?.demandTotal || (sA1 || new Array(12).fill(0)).map((v, i) => v + ((sA2 || [])[i] || 0))) : null
+
+  const bArr = isAnalyst
+    ? (includeAnalyst2 ? bTot : bA1)
+    : (baseline?.demandByRole?.[role] || new Array(12).fill(0))
+  const sArr = isAnalyst
+    ? (includeAnalyst2 ? sTot : sA1)
+    : (scenario?.demandByRole?.[role] || new Array(12).fill(0))
+
+  const capKey = isAnalyst ? 'Analyst 1' : role
+  const bEffCapArr = baselineCap?.[capKey]?.effectiveMonthlyByMonth || new Array(12).fill(baselineCap?.[capKey]?.effectiveMonthly || 0)
+  const sEffCapArr = scenarioCap?.[capKey]?.effectiveMonthlyByMonth || new Array(12).fill(scenarioCap?.[capKey]?.effectiveMonthly || (bEffCapArr[0] || 0))
+
+  const baseColor =
+    CHART_COLORS[role] ||
+    (String(role).toLowerCase().includes('analyst') ? CHART_COLORS.Analyst : null) ||
+    '#2563eb'
+
+  const annual = (arr) => (arr || []).reduce((a, b) => a + (b || 0), 0)
+  const deltaAnnual = annual(sArr) - annual(bArr)
+
+  const chartData = {
+    labels: MONTHS,
+    datasets: [
+      ...(isAnalyst && includeAnalyst2 ? [
+        {
+          label: 'Baseline Analyst 1 (base)',
+          data: (bA1 || []).map(v => Math.round(v)),
+          backgroundColor: 'rgba(148,163,184,0.50)',
+          borderRadius: 3,
+          type: 'bar',
+          stack: 'baseline',
+        },
+        {
+          label: 'Baseline Analyst 2 (incremental)',
+          data: (bA2 || []).map(v => Math.round(v)),
+          backgroundColor: 'rgba(148,163,184,0.25)',
+          borderRadius: 3,
+          type: 'bar',
+          stack: 'baseline',
+        },
+        {
+          label: 'Scenario Analyst 1 (base)',
+          data: (sA1 || []).map(v => Math.round(v)),
+          backgroundColor: baseColor + 'cc',
+          borderRadius: 3,
+          type: 'bar',
+          stack: 'scenario',
+        },
+        {
+          label: 'Scenario Analyst 2 (incremental)',
+          data: (sA2 || []).map(v => Math.round(v)),
+          backgroundColor: 'rgba(196, 123, 26, 0.65)',
+          borderRadius: 3,
+          type: 'bar',
+          stack: 'scenario',
+        },
+      ] : isAnalyst ? [
+        {
+          label: 'Baseline demand (Analyst 1)',
+          data: (bA1 || []).map(v => Math.round(v)),
+          backgroundColor: 'rgba(148,163,184,0.55)',
+          borderRadius: 3,
+          type: 'bar',
+        },
+        {
+          label: 'Scenario demand (Analyst 1)',
+          data: (sA1 || []).map(v => Math.round(v)),
+          backgroundColor: baseColor + 'cc',
+          borderRadius: 3,
+          type: 'bar',
+        },
+      ] : [
+        {
+          label: 'Baseline demand',
+          data: bArr.map(v => Math.round(v)),
+          backgroundColor: 'rgba(148,163,184,0.55)',
+          borderRadius: 3,
+          type: 'bar',
+        },
+        {
+          label: 'Scenario demand',
+          data: sArr.map(v => Math.round(v)),
+          backgroundColor: baseColor + 'cc',
+          borderRadius: 3,
+          type: 'bar',
+        },
+      ]),
+      {
+        label: 'Baseline eff. cap',
+        data: bEffCapArr.map(v => Math.round(v || 0)),
+        type: 'line',
+        borderColor: 'rgba(148,163,184,0.95)',
+        borderDash: [6, 3],
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false,
+      },
+      {
+        label: 'Scenario eff. cap',
+        data: sEffCapArr.map(v => Math.round(v || 0)),
+        type: 'line',
+        borderColor: '#c84b31',
+        borderDash: [4, 4],
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false,
+      },
+    ],
+  }
+
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <CardHeader title="Capacity vs Demand (Full Year)">
+        <Tag>{role}</Tag>
+      </CardHeader>
+      <CardBody>
+        <CapacityRiskImpact
+          baseline={baseline}
+          scenario={scenario}
+          baselineCap={baselineCap}
+          scenarioCap={scenarioCap}
+          includeAnalyst2={includeAnalyst2}
+        />
+
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          {['CSM', 'PM', 'Analyst'].map(r => (
+            <button
+              key={r}
+              onClick={() => setRole(r)}
+              style={{
+                padding: '5px 12px',
+                borderRadius: 99,
+                fontSize: 12,
+                fontWeight: role === r ? 650 : 500,
+                border: `1.5px solid ${role === r ? C.accent : C.border}`,
+                background: role === r ? 'var(--accent-light)' : C.surface,
+                color: role === r ? C.accent : C.muted,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              {r}
+            </button>
+          ))}
+          <div style={{ marginLeft: 'auto', fontSize: 11.5, color: C.muted }}>
+            Annual Δ:{' '}
+            <strong style={{ color: deltaAnnual < 0 ? 'var(--green)' : deltaAnnual > 0 ? 'var(--red)' : C.faint }}>
+              {deltaAnnual === 0 ? '—' : `${deltaAnnual > 0 ? '+' : ''}${Math.round(deltaAnnual).toLocaleString()}h`}
+            </strong>
+          </div>
+        </div>
+
+        <div style={{ position: 'relative', height: 260 }}>
+          <Bar
+            ref={chartRef}
+            data={chartData}
+            options={{
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  position: 'bottom',
+                  labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } },
+                },
+              },
+              scales: {
+                x: { grid: { display: false }, stacked: isAnalyst && includeAnalyst2 },
+                y: { grid: { color: '#f0ede6' }, ticks: { callback: v => v.toLocaleString() }, stacked: isAnalyst && includeAnalyst2 },
+              },
+            }}
+          />
+        </div>
+
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.55 }}>
+          {isAnalyst
+            ? 'Analyst 1 (base) + Analyst 2 (incremental) demand is stacked; capacity line remains Analyst 1 baseline only.'
+            : 'Baseline bars vs scenario bars. Dashed lines show effective capacity baselines (scenario line reflects FTE/attrition overrides).'
+          }
+        </div>
+      </CardBody>
+    </Card>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MONTHLY DELTA TABLE
+// ─────────────────────────────────────────────────────────────────────────
+
+function MonthlyDeltaTable({ baseline, scenario, baselineCap, scenarioCap, diff, includeAnalyst2 }) {
+  const [role, setRole] = useState('CSM')
+  const isAnalyst = role === 'Analyst'
+
+  const bA1 = isAnalyst ? (baseline?.analystModel?.demandBase || baseline?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)) : null
+  const bA2 = isAnalyst ? (baseline?.analystModel?.demandIncremental || baseline?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)) : null
+  const bTot = isAnalyst ? (baseline?.analystModel?.demandTotal || (bA1 || new Array(12).fill(0)).map((v, i) => v + ((bA2 || [])[i] || 0))) : null
+
+  const sA1 = isAnalyst ? (scenario?.analystModel?.demandBase || scenario?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)) : null
+  const sA2 = isAnalyst ? (scenario?.analystModel?.demandIncremental || scenario?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)) : null
+  const sTot = isAnalyst ? (scenario?.analystModel?.demandTotal || (sA1 || new Array(12).fill(0)).map((v, i) => v + ((sA2 || [])[i] || 0))) : null
+
+  const bArr = isAnalyst ? (includeAnalyst2 ? bTot : bA1) : (baseline?.demandByRole?.[role] || new Array(12).fill(0))
+  const sArr = isAnalyst ? (includeAnalyst2 ? sTot : sA1) : (scenario?.demandByRole?.[role]  || new Array(12).fill(0))
+
+  const capKey = isAnalyst ? 'Analyst 1' : role
+  const bEffArr = baselineCap?.[capKey]?.effectiveMonthlyByMonth || new Array(12).fill(baselineCap?.[capKey]?.effectiveMonthly || 0)
+  const sEffArr = scenarioCap?.[capKey]?.effectiveMonthlyByMonth || new Array(12).fill(scenarioCap?.[capKey]?.effectiveMonthly || (bEffArr[0] || 0))
+
+  return (
+    <div>
+      {/* Role selector */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {['CSM', 'PM', 'Analyst'].map(r => (
+          <button key={r} onClick={() => setRole(r)} style={{
+            padding: '5px 12px', borderRadius: 99, fontSize: 12, fontWeight: role === r ? 600 : 400,
+            border: `1.5px solid ${role === r ? C.accent : C.border}`,
+            background: role === r ? 'var(--accent-light)' : C.surface,
+            color: role === r ? C.accent : C.muted,
+            cursor: 'pointer', fontFamily: 'var(--font-sans)',
+          }}>{r}</button>
+        ))}
+      </div>
+
+      {/* Month table */}
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+          <thead>
+            <tr style={{ background: 'var(--surface-1)' }}>
+              <th style={thSt}>Month</th>
+              {MONTHS.map(m => <th key={m} style={{ ...thSt, textAlign: 'right' }}>{m}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={{ ...tdSt, fontWeight: 600, color: C.muted }}>Baseline</td>
+              {bArr.map((v, i) => (
+                <td key={i} style={{ ...tdSt, textAlign: 'right', color: v > (bEffArr[i] || 0) ? 'var(--red)' : C.ink }}>
+                  {Math.round(v).toLocaleString()}
+                </td>
+              ))}
+            </tr>
+            <tr style={{ background: 'var(--accent-light)' }}>
+              <td style={{ ...tdSt, fontWeight: 600, color: C.accent }}>Scenario</td>
+              {sArr.map((v, i) => (
+                <td key={i} style={{ ...tdSt, textAlign: 'right', fontWeight: 600, color: v > (sEffArr[i] || 0) ? 'var(--red)' : C.ink }}>
+                  {Math.round(v).toLocaleString()}
+                </td>
+              ))}
+            </tr>
+            <tr style={{ borderTop: `2px solid ${C.border}` }}>
+              <td style={{ ...tdSt, fontWeight: 600 }}>Δ</td>
+              {MONTHS.map((_, i) => {
+                const d = sArr[i] - bArr[i]
+                return (
+                  <td key={i} style={{ ...tdSt, textAlign: 'right', fontWeight: 700, fontSize: 11,
+                    color: d < 0 ? 'var(--green)' : d > 0 ? 'var(--red)' : C.faint,
+                  }}>
+                    {d === 0 ? '—' : `${d > 0 ? '+' : ''}${Math.round(d).toLocaleString()}`}
+                  </td>
+                )
+              })}
+            </tr>
+            <tr>
+              <td style={{ ...tdSt, color: C.muted, fontSize: 10.5 }}>Eff. cap (baseline)</td>
+              {MONTHS.map((_, i) => (
+                <td key={i} style={{ ...tdSt, textAlign: 'right', color: C.faint, fontSize: 10.5 }}>
+                  {Math.round(bEffArr[i] || 0).toLocaleString()}
+                </td>
+              ))}
+            </tr>
+            <tr>
+              <td style={{ ...tdSt, color: C.muted, fontSize: 10.5 }}>Eff. cap (scenario)</td>
+              {MONTHS.map((_, i) => (
+                <td key={i} style={{ ...tdSt, textAlign: 'right', color: C.faint, fontSize: 10.5 }}>
+                  {Math.round(sEffArr[i] || 0).toLocaleString()}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CAPACITY COMPARE TABLE
+// ─────────────────────────────────────────────────────────────────────────
+
+function CapacityCompareTable({ baselineCap, scenarioCap }) {
+  const roles = ['CSM', 'PM', 'Analyst', 'SE']
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+      <thead>
+        <tr style={{ background: 'var(--surface-1)' }}>
+          {['Role', 'Baseline FTE', 'Scenario FTE', 'Δ FTE', 'Baseline Eff. Cap/mo', 'Scenario Eff. Cap/mo', 'Δ Cap/mo'].map(h => (
+            <th key={h} style={thSt}>{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {roles.map((role, i) => {
+          const capKey = role === 'Analyst' ? 'Analyst 1' : role
+          const bCap = baselineCap?.[capKey] || {}
+          const sCap = scenarioCap?.[capKey] || {}
+          const fteDelta = (sCap.fte || 0) - (bCap.fte || 0)
+          const capDelta = Math.round((sCap.effectiveMonthly || 0) - (bCap.effectiveMonthly || 0))
+          return (
+            <tr key={role} style={{ background: i % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
+              <td style={{ ...tdSt, fontWeight: 600 }}>{role}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)' }}>{bCap.fte ?? '—'}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)', color: fteDelta !== 0 ? (fteDelta > 0 ? 'var(--green)' : 'var(--red)') : C.ink, fontWeight: fteDelta !== 0 ? 600 : 400 }}>{sCap.fte ?? '—'}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)', fontWeight: 700, color: fteDelta < 0 ? 'var(--red)' : fteDelta > 0 ? 'var(--green)' : C.faint }}>
+                {fteDelta === 0 ? '—' : `${fteDelta > 0 ? '+' : ''}${fteDelta}`}
+              </td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)' }}>{Math.round(bCap.effectiveMonthly || 0).toLocaleString()}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)' }}>{Math.round(sCap.effectiveMonthly || 0).toLocaleString()}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)', fontWeight: 700, color: capDelta < 0 ? 'var(--red)' : capDelta > 0 ? 'var(--green)' : C.faint }}>
+                {capDelta === 0 ? '—' : `${capDelta > 0 ? '+' : ''}${capDelta.toLocaleString()}`}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// UTILITY COMPONENTS
+// ─────────────────────────────────────────────────────────────────────────
+
+function EditableScenarioName({ value, onChange }) {
+  const [editing, setEditing] = useState(false)
+  const [local, setLocal] = useState(value)
+
+  if (!editing) return null // name shown in EditPanel header instead
+
+  return (
+    <input
+      autoFocus
+      value={local}
+      onChange={e => setLocal(e.target.value)}
+      onBlur={() => { onChange(local); setEditing(false) }}
+      onKeyDown={e => e.key === 'Enter' && (onChange(local), setEditing(false))}
+      style={{ ...inputStyle(), fontSize: 14, fontWeight: 600 }}
+    />
+  )
+}
+
+function EditableDescription({ value, onChange }) {
+  const [editing, setEditing] = useState(false)
+  if (!editing) return (
+    <div onClick={() => setEditing(true)} style={{ fontSize: 11.5, color: value ? C.muted : C.faint, marginTop: 3, cursor: 'text' }}>
+      {value || 'Add description…'}
+    </div>
+  )
+  return (
+    <input
+      autoFocus
+      value={value || ''}
+      onChange={e => onChange(e.target.value)}
+      onBlur={() => setEditing(false)}
+      placeholder="Brief description of this scenario"
+      style={{ ...inputStyle(), fontSize: 11.5, marginTop: 3 }}
+    />
+  )
+}
+
+function FieldGroup({ label, children }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: C.muted, marginBottom: 4 }}>
+        {label}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function SmallBadge({ color, children }) {
+  return (
+    <span style={{
+      fontSize: 9.5, fontWeight: 600, padding: '1px 6px', borderRadius: 99,
+      background: color + '18', color, border: `1px solid ${color}33`,
+    }}>
+      {children}
+    </span>
+  )
+}
+
+function IconBtn({ children, onClick, title, color }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        border: 'none', background: 'transparent', cursor: 'pointer',
+        fontSize: 12, color: color || C.faint, borderRadius: 4,
+        transition: 'background 0.1s',
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-2)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+    >
+      {children}
+    </button>
+  )
+}
+
+function SmallInlineBtn({ children, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        marginTop: 6,
+        background: 'var(--surface-1)',
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: '3px 8px',
+        fontSize: 11,
+        fontWeight: 650,
+        color: C.muted,
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+function NoFilePrompt() {
+  return (
+    <div style={{ padding: '60px 40px', textAlign: 'center', color: C.muted }}>
+      <div style={{ fontSize: 36, marginBottom: 12 }}>📂</div>
+      <div style={{ fontFamily: 'var(--font-serif)', fontSize: 20, color: C.ink, marginBottom: 8 }}>Upload a file to begin</div>
+      <div style={{ fontSize: 13 }}>Scenario planning requires an uploaded Excel capacity model as the baseline.</div>
+    </div>
+  )
+}
+
+function StartPrompt({ onNew }) {
+  return (
+    <div style={{ padding: '60px 40px', textAlign: 'center', color: C.muted }}>
+      <div style={{ fontSize: 36, marginBottom: 12 }}>⚡</div>
+      <div style={{ fontFamily: 'var(--font-serif)', fontSize: 20, color: C.ink, marginBottom: 8 }}>Create your first scenario</div>
+      <div style={{ fontSize: 13, marginBottom: 24 }}>Model a what-if — shift timelines, adjust FTE, change assumptions. Compare against your baseline without touching the source file.</div>
+      <button onClick={() => onNew({ name: '' })} style={btnStyle('primary')}>+ Create Scenario</button>
+    </div>
+  )
+}
+
+function LoadingState({ msg }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '24px 0', color: C.muted }}>
+      <div style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+      <span style={{ fontSize: 13 }}>{msg}</span>
+    </div>
+  )
+}
+
+function ErrorState({ msg }) {
+  return (
+    <div style={{ background: 'var(--red-light)', border: '1px solid #fecaca', borderRadius: 8, padding: '12px 16px', color: '#991b1b', fontSize: 13 }}>
+      <strong>Calculation error:</strong> {msg}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// STYLE HELPERS
+// ─────────────────────────────────────────────────────────────────────────
+
+function inputStyle(extra = {}) {
+  return {
+    padding: '6px 10px', border: `1px solid ${C.border}`, borderRadius: 6,
+    fontSize: 12.5, fontFamily: 'var(--font-sans)', background: C.surface,
+    color: C.ink, outline: 'none', width: '100%', ...extra,
+  }
+}
+
+function btnStyle(variant) {
+  const base = { border: 'none', borderRadius: 6, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-sans)', padding: '7px 14px' }
+  if (variant === 'primary')    return { ...base, background: 'var(--accent)', color: 'white' }
+  if (variant === 'ghost')      return { ...base, background: 'var(--surface-1)', color: C.ink, border: `1px solid ${C.border}` }
+  if (variant === 'danger-sm')  return { ...base, background: 'var(--red-light)', color: 'var(--red)', fontSize: 11, padding: '3px 9px' }
+  return base
+}
+
+const thSt = {
+  padding: '9px 12px', textAlign: 'left',
+  fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.6px',
+  color: C.muted, borderBottom: `1px solid ${C.border}`,
+  background: 'var(--surface-1)', whiteSpace: 'nowrap',
+}
+
+const tdSt = {
+  padding: '8px 12px', fontSize: 12,
+  color: C.ink, borderBottom: `1px solid ${C.border}`,
+}
+
+function miniKpi() {
+  return {
+    background: 'var(--surface-1)',
+    border: `1px solid ${C.border}`,
+    borderRadius: 10,
+    padding: '12px 14px',
+    boxShadow: 'var(--shadow-sm)',
+  }
+}
+
+function miniLabel() {
+  return {
+    fontSize: 10.5,
+    fontWeight: 800,
+    textTransform: 'uppercase',
+    letterSpacing: '0.7px',
+    color: C.muted,
+    marginBottom: 6,
+  }
+}
+
+function miniVal() {
+  return {
+    fontFamily: 'var(--font-serif)',
+    fontSize: 16,
+    color: C.ink,
+    fontWeight: 700,
+  }
+}
