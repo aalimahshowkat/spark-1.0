@@ -15,6 +15,15 @@ import { useEngineInsightsData } from './useEngineInsightsData'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const ROLE_OPTIONS = ['CSM', 'PM', 'Analyst'] // Analyst = Analyst 1 + Analyst 2 combined
+const DEMAND_ROLE_OPTIONS = ['All', 'CSM', 'PM', 'Analyst']
+const TOP_DEMAND_N = 10
+
+const C = {
+  border: 'var(--border)',
+  ink: 'var(--ink)',
+  muted: 'var(--ink-muted)',
+  faint: 'var(--ink-faint)',
+}
 
 function roleMatchesSet(role) {
   if (role === 'Analyst') return new Set(['Analyst 1', 'Analyst 2'])
@@ -38,8 +47,17 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
 
   const [role, setRole] = useState('CSM')
   const [person, setPerson] = useState('')
+  const [demandRole, setDemandRole] = useState('All')
+  const [showTopDemand, setShowTopDemand] = useState(false)
+  const [portfolioQuery, setPortfolioQuery] = useState('')
+  const [demandQuery, setDemandQuery] = useState('')
 
   const roleMatches = useMemo(() => roleMatchesSet(role), [role])
+  const demandRoleMatches = useMemo(() => {
+    if (demandRole === 'All') return new Set(['CSM', 'PM', 'Analyst 1', 'Analyst 2'])
+    if (demandRole === 'Analyst') return new Set(['Analyst 1', 'Analyst 2'])
+    return new Set([demandRole])
+  }, [demandRole])
 
   const roleRows = useMemo(() => {
     return assignments.filter(r => roleMatches.has(r.role))
@@ -86,6 +104,52 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
     }
     return map
   }, [insightsData])
+
+  const topDemandProjects = useMemo(() => {
+    const byProject = new Map()
+
+    for (const row of assignments) {
+      if (!demandRoleMatches.has(row?.role)) continue
+      const key = row?.projectId || row?.projectName
+      if (!key) continue
+      const name = String(row?.projectName || '').trim() || '(unnamed)'
+      const mi = Number.isFinite(+row?.monthIndex) ? +row.monthIndex : 0
+      const hrs = safeNum(row?.finalHours)
+      if (hrs <= 0) continue
+
+      if (!byProject.has(key)) {
+        const meta = projectMetaByName.get(name)
+        byProject.set(key, {
+          key,
+          name,
+          type: meta?.type || row?.vibeType || 'Bond',
+          status: meta?.status || '—',
+          monthly: new Array(12).fill(0),
+          total: 0,
+        })
+      }
+
+      const rec = byProject.get(key)
+      rec.monthly[mi] += hrs
+      rec.total += hrs
+    }
+
+    const q = String(demandQuery || '').trim().toLowerCase()
+    const rows = [...byProject.values()]
+      .filter(p => {
+        if (!q) return true
+        return String(p?.name || '').toLowerCase().includes(q)
+      })
+      .sort((a, b) => b.total - a.total)
+    const maxTotal = rows[0]?.total || 0
+
+    return {
+      rows: rows.slice(0, TOP_DEMAND_N),
+      maxTotal,
+      totalWithDemand: byProject.size,
+      totalMatched: rows.length,
+    }
+  }, [assignments, demandRoleMatches, projectMetaByName, demandQuery])
 
   // Group to: projectKey -> { name, type, status, start, end, monthly[12], total, hasAnalyst2 }
   const projectsForPerson = useMemo(() => {
@@ -245,6 +309,11 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
   }, [projectsForPerson])
 
   const allProjects = insightsData?.projects || []
+  const filteredPortfolioProjects = useMemo(() => {
+    const q = String(portfolioQuery || '').trim().toLowerCase()
+    if (!q) return allProjects
+    return (allProjects || []).filter(p => String(p?.name || '').toLowerCase().includes(q))
+  }, [allProjects, portfolioQuery])
 
   return (
     <div style={{ animation: 'fadeUp 0.22s ease both' }}>
@@ -269,12 +338,31 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
         <div style={{ padding: 20, color: 'var(--red)' }}>{insightsError}</div>
       )}
 
-      {/* Portfolio Gantt */}
+      {/* Portfolio timeline */}
       {!!allProjects.length && (
         <Card style={{ marginBottom: 16 }}>
-          <CardHeader title="All Projects Timeline" tag={`${allProjects.length} projects`} />
+          <CardHeader
+            title="All Projects Timeline"
+            tag={`${filteredPortfolioProjects.length} shown · ${allProjects.length} total`}
+          >
+            <input
+              value={portfolioQuery}
+              onChange={(e) => setPortfolioQuery(e.target.value)}
+              placeholder="Search projects…"
+              style={{
+                padding: '6px 10px',
+                borderRadius: 8,
+                border: `1px solid ${C.border}`,
+                background: 'white',
+                fontSize: 12,
+                fontFamily: 'var(--font-sans)',
+                outline: 'none',
+                width: 220,
+              }}
+            />
+          </CardHeader>
           <CardBody>
-            <GanttChart projects={allProjects} />
+            <GanttChart projects={filteredPortfolioProjects} />
             <Legend items={[
               { label: 'Bond',      color: '#2857a4' },
               { label: 'Validate',  color: '#2a7a52' },
@@ -282,6 +370,131 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
               { label: 'Explore',   color: '#c47b1a' },
             ]} />
           </CardBody>
+        </Card>
+      )}
+
+      {/* Top demand projects (collapsible) */}
+      {!!allProjects.length && (
+        <Card style={{ marginBottom: 16 }}>
+          <CardHeader
+            title="Top demand projects"
+            tag={`Top ${TOP_DEMAND_N} by demand`}
+          >
+            <button
+              onClick={() => setShowTopDemand(v => !v)}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 8,
+                border: `1px solid ${C.border}`,
+                background: 'white',
+                fontSize: 12,
+                fontFamily: 'var(--font-sans)',
+                cursor: 'pointer',
+              }}
+              title={showTopDemand ? 'Collapse' : 'Expand'}
+            >
+              {showTopDemand ? 'Hide' : 'Show'}
+            </button>
+          </CardHeader>
+          {showTopDemand && (
+            <CardBody>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 800, letterSpacing: '0.02em' }}>
+                  Role
+                </div>
+                <select
+                  value={demandRole}
+                  onChange={(e) => setDemandRole(e.target.value)}
+                  style={{
+                    padding: '7px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${C.border}`,
+                    background: 'white',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    cursor: 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  {DEMAND_ROLE_OPTIONS.map(r => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+
+                <input
+                  value={demandQuery}
+                  onChange={(e) => setDemandQuery(e.target.value)}
+                  placeholder="Search projects…"
+                  style={{
+                    padding: '7px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${C.border}`,
+                    background: 'white',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    outline: 'none',
+                    width: 220,
+                  }}
+                />
+
+                <div style={{ marginLeft: 'auto', fontSize: 11.5, color: C.faint }}>
+                  {topDemandProjects.totalWithDemand
+                    ? `${topDemandProjects.totalWithDemand} with demand · ${allProjects.length} total`
+                    : `— · ${allProjects.length} total`}
+                </div>
+              </div>
+
+              {topDemandProjects.rows.length ? (
+                <div style={{ maxHeight: 320, overflow: 'auto', paddingRight: 6 }}>
+                  {topDemandProjects.rows.map(p => {
+                    const pct = topDemandProjects.maxTotal ? (p.total / topDemandProjects.maxTotal) : 0
+                    const peak = (() => {
+                      let idx = 0, best = -1
+                      for (let i = 0; i < 12; i++) {
+                        const v = p.monthly[i] || 0
+                        if (v > best) { best = v; idx = i }
+                      }
+                      return { idx, val: best }
+                    })()
+
+                    const VIBE_COLORS = {
+                      Bond: '#2857a4',
+                      Validate: '#2a7a52',
+                      Integrate: '#c84b31',
+                      Explore: '#c47b1a',
+                    }
+                    const vibeColor = VIBE_COLORS[p.type] || '#888'
+
+                    return (
+                      <div key={p.key} style={{ padding: '8px 0', borderBottom: '1px solid var(--paper-warm)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <div style={{ width: 9, height: 9, borderRadius: 3, background: vibeColor, flexShrink: 0 }} />
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 12.5, fontWeight: 650, color: C.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {p.name}
+                            </div>
+                            <div style={{ fontSize: 11.5, color: C.faint }}>
+                              {p.type} · Peak: {MONTHS[peak.idx]} {Math.round(peak.val).toLocaleString()}h
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 12, fontWeight: 800, color: C.ink, flexShrink: 0 }}>
+                            {Math.round(p.total).toLocaleString()}h
+                          </div>
+                        </div>
+                        <div style={{ marginTop: 6, height: 8, background: 'var(--surface-1)', borderRadius: 99, overflow: 'hidden' }}>
+                          <div style={{ width: `${Math.max(0.06, pct) * 100}%`, height: '100%', background: vibeColor, opacity: 0.85 }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div style={{ padding: '16px 0', color: C.faint, fontSize: 12.5 }}>
+                  {demandQuery ? 'No projects match your search.' : 'No demand found for this selection.'}
+                </div>
+              )}
+            </CardBody>
+          )}
         </Card>
       )}
 
