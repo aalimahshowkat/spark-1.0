@@ -1177,6 +1177,199 @@ function ComparePanel({ sc, baselineCalc }) {
     [baselineConfig]
   )
 
+  // Hooks must remain unconditional — keep this above any early returns.
+  const impact = useMemo(() => {
+    if (!baselineCalc || !scenarioCalc || !baselineCap || !scenarioCap) return null
+
+    const sum = (arr) => (arr || []).reduce((a, b) => a + (b || 0), 0)
+    const roles = ['CSM', 'PM', 'Analyst']
+    const capKey = (role) => (role === 'Analyst' ? 'Analyst 1' : role)
+
+    const demandSeries = (calc, role) => {
+      if (role !== 'Analyst') return calc?.demandByRole?.[role] || new Array(12).fill(0)
+      const base = calc?.analystModel?.demandBase || calc?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)
+      const inc = calc?.analystModel?.demandIncremental || calc?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)
+      const tot = calc?.analystModel?.demandTotal || base.map((v, i) => (v || 0) + (inc[i] || 0))
+      return includeAnalyst2 ? tot : base
+    }
+
+    const effCapSeries = (cap, role) => {
+      const key = capKey(role)
+      return cap?.[key]?.effectiveMonthlyByMonth || new Array(12).fill(cap?.[key]?.effectiveMonthly || 0)
+    }
+
+    const hrsPerPersonSeries = (cap, role) => {
+      const key = capKey(role)
+      return cap?.[key]?.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+    }
+
+    const monthsOverSeries = (dem, capArr) => (dem || []).filter((d, i) => (d || 0) > (capArr?.[i] || 0)).length
+
+    const breachDetails = (role) => {
+      const bDem = demandSeries(baselineCalc, role)
+      const sDem = demandSeries(scenarioCalc, role)
+      const bCapArr = effCapSeries(baselineCap, role)
+      const sCapArr = effCapSeries(scenarioCap, role)
+
+      const bBreach = bDem.map((v, i) => (v || 0) > (bCapArr[i] || 0))
+      const sBreach = sDem.map((v, i) => (v || 0) > (sCapArr[i] || 0))
+
+      const resolvedIdx = MONTHS.map((_, i) => (bBreach[i] && !sBreach[i]) ? i : -1).filter(i => i !== -1)
+      const introducedIdx = MONTHS.map((_, i) => (!bBreach[i] && sBreach[i]) ? i : -1).filter(i => i !== -1)
+
+      const bCount = monthsOverSeries(bDem, bCapArr)
+      const sCount = monthsOverSeries(sDem, sCapArr)
+
+      return {
+        role,
+        bCount,
+        sCount,
+        deltaCount: sCount - bCount,
+        resolvedIdx,
+        introducedIdx,
+        resolvedMonths: resolvedIdx.map(i => MONTHS[i]).join(', '),
+        introducedMonths: introducedIdx.map(i => MONTHS[i]).join(', '),
+        annualDemandDelta: sum(sDem) - sum(bDem),
+        annualCapDelta: sum(sCapArr) - sum(bCapArr),
+      }
+    }
+
+    const roleSummaries = roles.map(breachDetails)
+
+    const formatH = (n) => {
+      const v = Math.round(n || 0)
+      if (!v) return '—'
+      return `${v > 0 ? '+' : ''}${v.toLocaleString()}h`
+    }
+
+    const formatMonthsDelta = (d) => d === 0 ? '—' : `${d > 0 ? '+' : ''}${d}`
+
+    // ── Project drivers: top annual hour deltas from assignments ─────────
+    const normalizeRole = (r) => (r === 'Analyst 1' || r === 'Analyst 2') ? 'Analyst' : r
+    const isPrimary = (r) => r === 'CSM' || r === 'PM' || r === 'Analyst'
+
+    const aggProjects = (calc) => {
+      const out = new Map()
+      const rows = Array.isArray(calc?.assignments) ? calc.assignments : []
+      for (const row of rows) {
+        const role = normalizeRole(row?.role)
+        if (!isPrimary(role)) continue
+        const k = row?.projectId || row?.projectName
+        if (!k) continue
+        const name = String(row?.projectName || '').trim() || '(unnamed)'
+        const hrs = Number.isFinite(+row?.finalHours) ? +row.finalHours : 0
+        if (!hrs) continue
+        if (!out.has(k)) out.set(k, { key: k, name, total: 0, byRole: { CSM: 0, PM: 0, Analyst: 0 } })
+        const rec = out.get(k)
+        rec.total += hrs
+        rec.byRole[role] += hrs
+      }
+      return out
+    }
+
+    const bProj = aggProjects(baselineCalc)
+    const sProj = aggProjects(scenarioCalc)
+    const projKeys = new Set([...bProj.keys(), ...sProj.keys()])
+
+    const projectDeltas = [...projKeys].map(k => {
+      const b = bProj.get(k) || { key: k, name: sProj.get(k)?.name || '(unnamed)', total: 0, byRole: { CSM: 0, PM: 0, Analyst: 0 } }
+      const s = sProj.get(k) || { key: k, name: b.name, total: 0, byRole: { CSM: 0, PM: 0, Analyst: 0 } }
+      const delta = s.total - b.total
+      const byRoleDelta = {
+        CSM: (s.byRole.CSM || 0) - (b.byRole.CSM || 0),
+        PM: (s.byRole.PM || 0) - (b.byRole.PM || 0),
+        Analyst: (s.byRole.Analyst || 0) - (b.byRole.Analyst || 0),
+      }
+      return {
+        key: k,
+        name: s.name || b.name || '(unnamed)',
+        baselineTotal: b.total,
+        scenarioTotal: s.total,
+        delta,
+        byRoleDelta,
+      }
+    })
+      .filter(p => Math.abs(p.delta) >= 1)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+
+    const topProjectDrivers = projectDeltas.slice(0, 6)
+
+    // ── People: largest increases in “over capacity” month(s) ────────────
+    const aggPeople = (calc) => {
+      const out = new Map() // key `${role}__${name}` with Analyst combined
+      const rows = calc?.demandByPerson || {}
+      for (const v of Object.values(rows)) {
+        const role = normalizeRole(v?.role)
+        if (!isPrimary(role)) continue
+        const name = String(v?.name || '').trim()
+        if (!name) continue
+        const k = `${role}__${name}`
+        if (!out.has(k)) out.set(k, { role, name, monthly: new Array(12).fill(0) })
+        const rec = out.get(k)
+        const m = Array.isArray(v?.monthly) ? v.monthly : []
+        for (let i = 0; i < 12; i++) rec.monthly[i] += (m[i] || 0)
+      }
+      return out
+    }
+
+    const bPeople = aggPeople(baselineCalc)
+    const sPeople = aggPeople(scenarioCalc)
+    const peopleKeys = new Set([...bPeople.keys(), ...sPeople.keys()])
+
+    const overloadDeltas = []
+    for (const k of peopleKeys) {
+      const b = bPeople.get(k) || sPeople.get(k)
+      const s = sPeople.get(k) || bPeople.get(k)
+      if (!b || !s) continue
+
+      const role = s.role || b.role
+      const name = s.name || b.name
+      const hrsCapB = hrsPerPersonSeries(baselineCap, role)
+      const hrsCapS = hrsPerPersonSeries(scenarioCap, role)
+
+      for (let i = 0; i < 12; i++) {
+        const bOver = (b.monthly[i] || 0) - (hrsCapB[i] || HRS_PER_PERSON_MONTH)
+        const sOver = (s.monthly[i] || 0) - (hrsCapS[i] || HRS_PER_PERSON_MONTH)
+        const delta = sOver - bOver
+        if (sOver <= 0) continue
+        if (delta <= 0.5) continue
+        overloadDeltas.push({
+          key: `${k}__${i}`,
+          role,
+          name,
+          monthIndex: i,
+          over: sOver,
+          overDelta: delta,
+          hours: s.monthly[i] || 0,
+          cap: hrsCapS[i] || HRS_PER_PERSON_MONTH,
+          isNew: bOver <= 0,
+        })
+      }
+    }
+
+    overloadDeltas.sort((a, b) => (b.isNew - a.isNew) || (b.overDelta - a.overDelta))
+    const topOverloads = overloadDeltas.slice(0, 6)
+
+    // ── Unstaffed hours delta (all roles as-is) ──────────────────────────
+    const bUn = baselineCalc?.unstaffedHours || {}
+    const sUn = scenarioCalc?.unstaffedHours || {}
+    const unstaffedDelta = roles.map(role => {
+      const key = role === 'Analyst' ? 'Analyst 1' : role
+      const bArr = bUn[key] || new Array(12).fill(0)
+      const sArr = sUn[key] || new Array(12).fill(0)
+      return { role, delta: sum(sArr) - sum(bArr) }
+    })
+
+    return {
+      roleSummaries,
+      topProjectDrivers,
+      topOverloads,
+      unstaffedDelta,
+      formatH,
+      formatMonthsDelta,
+    }
+  }, [baselineCalc, scenarioCalc, baselineCap, scenarioCap, includeAnalyst2])
+
   if (calcLoading) return <LoadingState msg="Running scenario calculation…" />
   if (calcError)   return <ErrorState msg={calcError} />
   if (!scenarioCalc) return (
@@ -1237,6 +1430,140 @@ function ComparePanel({ sc, baselineCalc }) {
           {activeSummary.attritionChanges > 0 && <Pill type="purple">{activeSummary.attritionChanges} attrition</Pill>}
           {activeSummary.assumptionChanges > 0 && <Pill type="amber">{activeSummary.assumptionChanges} assumption{activeSummary.assumptionChanges !== 1 ? 's' : ''}</Pill>}
         </div>
+      )}
+
+      {/* Impact summary (delta-first) */}
+      {impact && (
+        <Card style={{ marginBottom: 16 }}>
+          <CardHeader title="Impact summary">
+            <Tag>Δ vs baseline</Tag>
+          </CardHeader>
+          <CardBody>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 14, alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: 10.5, fontWeight: 900, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted, marginBottom: 10 }}>
+                  Capacity + risk changes
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '110px 1fr', rowGap: 10, columnGap: 10 }}>
+                  {impact.roleSummaries.map(r => {
+                    const color =
+                      r.deltaCount < 0 ? 'var(--green)' :
+                      r.deltaCount > 0 ? 'var(--red)' :
+                      C.faint
+                    return (
+                      <React.Fragment key={r.role}>
+                        <div style={{ fontWeight: 800, fontSize: 12, color: C.ink }}>{r.role}</div>
+                        <div style={{ fontSize: 12.5, lineHeight: 1.55 }}>
+                          <div>
+                            <strong style={{ color }}>{r.bCount} → {r.sCount}</strong>{' '}
+                            months over effective cap{' '}
+                            <span style={{ color, fontWeight: 800 }}>
+                              ({impact.formatMonthsDelta(r.deltaCount)})
+                            </span>
+                          </div>
+                          <div style={{ color: C.muted }}>
+                            Annual demand Δ <strong style={{ color: r.annualDemandDelta < 0 ? 'var(--green)' : r.annualDemandDelta > 0 ? 'var(--red)' : C.faint }}>
+                              {impact.formatH(r.annualDemandDelta)}
+                            </strong>
+                            {' · '}
+                            Annual effective capacity Δ <strong style={{ color: r.annualCapDelta > 0 ? 'var(--green)' : r.annualCapDelta < 0 ? 'var(--red)' : C.faint }}>
+                              {impact.formatH(r.annualCapDelta)}
+                            </strong>
+                          </div>
+                          {(r.resolvedIdx.length > 0 || r.introducedIdx.length > 0) && (
+                            <div style={{ color: C.faint, fontSize: 11.5, marginTop: 2 }}>
+                              {r.resolvedIdx.length > 0 && (
+                                <span><strong style={{ color: 'var(--green)' }}>Resolved:</strong> {r.resolvedMonths}</span>
+                              )}
+                              {r.resolvedIdx.length > 0 && r.introducedIdx.length > 0 && <span> · </span>}
+                              {r.introducedIdx.length > 0 && (
+                                <span><strong style={{ color: 'var(--amber)' }}>Introduced:</strong> {r.introducedMonths}</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </React.Fragment>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 10.5, fontWeight: 900, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted, marginBottom: 10 }}>
+                  Likely drivers
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: C.ink, marginBottom: 6 }}>
+                    Projects with biggest annual demand Δ
+                  </div>
+                  {impact.topProjectDrivers.length ? (
+                    impact.topProjectDrivers.map(p => {
+                      const d = p.delta || 0
+                      const tone = d < 0 ? 'var(--green)' : d > 0 ? 'var(--red)' : C.faint
+                      const roleBits = ['CSM', 'PM', 'Analyst']
+                        .map(r => ({ r, v: p.byRoleDelta?.[r] || 0 }))
+                        .filter(x => Math.abs(x.v) >= 1)
+                        .sort((a, b) => Math.abs(b.v) - Math.abs(a.v))
+                        .slice(0, 2)
+                        .map(x => `${x.r} ${impact.formatH(x.v)}`)
+                        .join(', ')
+                      const note = (p.baselineTotal > 0 && p.scenarioTotal === 0) ? 'Excluded' : roleBits
+                      return (
+                        <div key={p.key} style={{ fontSize: 12.5, color: C.muted, marginBottom: 4 }}>
+                          <strong style={{ color: C.ink }}>{p.name}</strong>{' '}
+                          <span style={{ color: tone, fontWeight: 850 }}>
+                            {impact.formatH(d)}
+                          </span>
+                          {note ? <span style={{ color: C.faint }}> · {note}</span> : null}
+                        </div>
+                      )
+                    })
+                  ) : (
+                    <div style={{ fontSize: 12.5, color: C.faint }}>
+                      No material project-level demand changes detected.
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: C.ink, marginBottom: 6 }}>
+                    People operating above per-person capacity (largest increases)
+                  </div>
+                  {impact.topOverloads.length ? (
+                    impact.topOverloads.map(r => (
+                      <div key={r.key} style={{ fontSize: 12.5, color: C.muted, marginBottom: 4 }}>
+                        <strong style={{ color: C.ink }}>{r.name}</strong>{' '}
+                        <span style={{ color: C.faint }}>({r.role})</span>{' '}
+                        — <strong>{MONTHS[r.monthIndex]}</strong>{' '}
+                        <span style={{ color: 'var(--red)', fontWeight: 850 }}>
+                          +{Math.round(r.over).toLocaleString()}h over
+                        </span>
+                        <span style={{ color: C.faint }}>
+                          {' '}({Math.round(r.hours).toLocaleString()}h vs {Math.round(r.cap).toLocaleString()}h cap){r.isNew ? ' · new' : ''}
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ fontSize: 12.5, color: C.faint }}>
+                      No increased over-capacity person-months detected.
+                    </div>
+                  )}
+                </div>
+
+                {!!impact.unstaffedDelta?.length && (
+                  <div style={{ marginTop: 12, fontSize: 11.5, color: C.faint, lineHeight: 1.55 }}>
+                    <strong>Unassigned hours Δ:</strong>{' '}
+                    {impact.unstaffedDelta
+                      .filter(r => Math.abs(r.delta) >= 1)
+                      .map(r => `${r.role} ${impact.formatH(r.delta)}`)
+                      .join(' · ') || '—'}
+                  </div>
+                )}
+              </div>
+            </div>
+          </CardBody>
+        </Card>
       )}
 
       {/* KPI cards (required) */}
