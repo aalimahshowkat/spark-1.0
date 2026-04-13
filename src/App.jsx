@@ -7,6 +7,7 @@ import PlanView          from './components/PlanView'
 import ExecutiveView     from './components/ExecutiveView'
 import CapacityView      from './components/CapacityView'
 import ProjectsView      from './components/ProjectsView'
+import WorkloadExplorerView from './components/WorkloadExplorerView'
 import DataEngineView    from './components/DataEngineView'
 import LogicLayerView    from './components/LogicLayerView'
 import ExportsView       from './components/ExportsView'
@@ -45,6 +46,7 @@ export const NAV = [
       { id: 'plan',       label: 'Plan',         icon: IconPlan,     alwaysEnabled: true },
       { id: 'overview',   label: 'Overview',     icon: IconGrid },
       { id: 'capacity',   label: 'Capacity',     icon: IconGauge },
+      { id: 'workload',   label: 'Workload Explorer', icon: IconWorkload },
       { id: 'scenarios',  label: 'Scenarios',    icon: IconScenario },
       { id: 'exports',    label: 'Exports',      icon: IconExport,   alwaysEnabled: true },
     ]
@@ -160,7 +162,7 @@ export default function App() {
     if (!item) return false
     if (item.alwaysEnabled) return true
     if (data) return true
-    if (hasEngineInput && ['overview','capacity','scenarios','projects'].includes(item.id)) return true
+    if (hasEngineInput && ['overview','capacity','workload','scenarios','projects'].includes(item.id)) return true
     return false
   }, [data, hasEngineInput])
 
@@ -219,6 +221,9 @@ export default function App() {
             {activeTab === 'capacity' && canRenderInsights && (
               <CapacityView data={data} uploadedFile={engineInput} source={insightsSource}
                 onSource={setInsightsSource} onNavigate={setActiveTab} />
+            )}
+            {activeTab === 'workload' && hasEngineInput && (
+              <WorkloadExplorerView engineInput={engineInput} engineCalc={engineCalc} />
             )}
             {activeTab === 'projects' && canRenderInsights && (
               <ProjectsView data={data} uploadedFile={engineInput} source={insightsSource}
@@ -305,6 +310,9 @@ export function IconGrid({ size=16, color='currentColor' }) {
 }
 export function IconGauge({ size=16, color='currentColor' }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a10 10 0 100 20A10 10 0 0012 2z"/><path d="M12 6v6l4 2"/></svg>
+}
+export function IconWorkload({ size=16, color='currentColor' }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12h18"/><path d="M7 12v7"/><path d="M12 12v4"/><path d="M17 12v9"/><path d="M7 8h0"/><path d="M12 6h0"/><path d="M17 9h0"/></svg>
 }
 export function IconProjects({ size=16, color='currentColor' }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 000 4h6a2 2 0 000-4M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
