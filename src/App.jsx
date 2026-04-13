@@ -16,6 +16,7 @@ import SparkAiView       from './components/SparkAiView'
 import SparkAssistantWidget from './components/SparkAssistantWidget'
 import { useEngineCalc } from './components/useEngineCalc'
 import { usePersistedBaseDataset } from './components/usePersistedBaseDataset'
+import { validateSparkWorkbookFile } from './engine/workbookValidator.js'
 
 const SHOW_ADVANCED = import.meta.env.VITE_SHOW_ADVANCED === 'true'
 
@@ -77,6 +78,7 @@ export default function App() {
   const [loading,      setLoading]      = useState(false)
   const [error,        setError]        = useState(null)
   const [notice,       setNotice]       = useState(null)
+  const [planIssues,   setPlanIssues]   = useState(null) // { ok, issues, meta } | null
   const [fileName,     setFileName]     = useState(null)
   const [uploadedFile, setUploadedFile] = useState(null)
   const [insightsSource, setInsightsSource] = useState('engine')
@@ -107,22 +109,28 @@ export default function App() {
     setInsightsSource('engine')
     const name = base?.sourceFileName || base?.ingest?.meta?.fileName || 'Current plan'
     setFileName(name)
-    // Skip Plan page — go straight to the dashboard
-    setActiveTab('overview')
   }, [base, uploadedFile])
 
   const handleFile = useCallback(async (file) => {
     setLoading(true)
     setError(null)
     setNotice(null)
-    setUploadedFile(file)
-    setDatasetMode('override')
+    setPlanIssues(null)
     try {
+      const v = await validateSparkWorkbookFile(file)
+      if (!v?.ok) {
+        setPlanIssues(v)
+        setActiveTab('plan')
+        return
+      }
+
+      // Accept file only after validation passes.
+      setUploadedFile(file)
+      setDatasetMode('override')
       const parsed = await parseExcelFile(file)
       parsed.meta.fileName = file.name
       setData(parsed)
       setFileName(file.name)
-      setActiveTab('overview')
     } catch (err) {
       const msg = err?.message || 'Failed to parse file.'
       const missingCapacityModel = msg.includes('Sheet "Capacity Model" not found')
@@ -130,9 +138,10 @@ export default function App() {
         setData(null)
         setFileName(file.name)
         setInsightsSource('engine')
-        setActiveTab('overview')
       } else {
         setError(msg)
+        // Reject file on parse failures to prevent working with unknown schema.
+        setUploadedFile(null)
       }
     } finally {
       setLoading(false)
@@ -201,6 +210,8 @@ export default function App() {
               <PlanView
                 onFile={handleFile}
                 loading={loading}
+                planIssues={planIssues}
+                onDismissPlanIssues={() => setPlanIssues(null)}
                 base={base}
                 baseSummary={baseSummary}
                 baseLoading={baseLoading}
@@ -212,6 +223,7 @@ export default function App() {
                 hasOverride={!!uploadedFile}
                 uploadedFileName={uploadedFile?.name}
                 engineInput={engineInput}
+                onGoToOverview={() => setActiveTab('overview')}
               />
             )}
             {activeTab === 'overview' && canRenderInsights && (

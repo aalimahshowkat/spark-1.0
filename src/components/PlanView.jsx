@@ -7,10 +7,12 @@
  *   - Provides inline project list editing via ProjectListManagerModal
  *   - No "base vs override" language — just "current plan"
  */
-import React, { useCallback, useState } from 'react'
+import React, { useCallback, useMemo, useState } from 'react'
 import { Card, CardHeader, CardBody, Pill } from './ui'
 import ProjectListManagerModal from './ProjectListManagerModal'
 import OrgRosterModal from './OrgRosterModal'
+import * as XLSX from 'xlsx'
+import { PROJECT_LIST_COLUMN_MAP } from '../engine/schema.js'
 
 const C = {
   accent: 'var(--accent)',
@@ -29,6 +31,8 @@ export default function PlanView({
   onFile,
   loading,
   baseLoading,
+  planIssues,
+  onDismissPlanIssues,
   base,
   baseSummary,
   datasetMode,
@@ -39,6 +43,7 @@ export default function PlanView({
   onUpdateBaseRoster,
   hasOverride,
   uploadedFileName,
+  onGoToOverview,
 }) {
   const [dragging, setDragging] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
@@ -55,6 +60,200 @@ export default function PlanView({
     : null
   const projectCount = base?.ingest?.projects?.length || baseSummary?.totalProjects || 0
   const roster = base?.ingest?.roster || []
+
+  const templateWb = useMemo(() => {
+    const wb = XLSX.utils.book_new()
+
+    const mandatoryOrder = [
+      'id',
+      'displayId',
+      'rawName',
+      'accountName',
+      'vibeType',
+      'status',
+      'startDate',
+      'analyticsStartDate',
+      'deliveryDate',
+      'orbit',
+      'networkType',
+      'dxLMs',
+      'txLMs',
+      'totalLMs',
+      'assignedCSM',
+      'assignedPM',
+      'assignedAnalyst1',
+      'assignedAnalyst2',
+      'analystUtilPct',
+      'phaseStartM0',
+      'phaseStartM1',
+      'phaseMid',
+      'phaseEndMinus1',
+      'phaseEndM0',
+      'phaseEndM1',
+      'phaseEndM1Plus',
+    ]
+
+    const orderedFields = mandatoryOrder.filter(f => Object.prototype.hasOwnProperty.call(PROJECT_LIST_COLUMN_MAP || {}, f))
+
+    const plHeaders = orderedFields
+      .map(f => (PROJECT_LIST_COLUMN_MAP?.[f]?.[0] || null))
+      .filter(Boolean)
+
+    const sampleByField = {
+      id: 'EX-123',
+      displayId: '1',
+      rawName: 'Example Project',
+      accountName: 'Example SF Account',
+      vibeType: 'Bond',
+      status: 'Open',
+      startDate: 'Jan-26',
+      analyticsStartDate: 'Feb-26',
+      deliveryDate: 'Jun-26',
+      orbit: 'A',
+      networkType: 'Dx',
+      dxLMs: 3000,
+      txLMs: 2000,
+      totalLMs: 5000,
+      assignedCSM: 'Example CSM',
+      assignedPM: 'Example PM',
+      assignedAnalyst1: 'Example Analyst 1',
+      assignedAnalyst2: 'Example Analyst 2',
+      analystUtilPct: 80,
+      // Phase inputs (optional, but we include plausible values)
+      phaseStartM0: 10,
+      phaseStartM1: 12,
+      phaseMid: 18,
+      phaseEndMinus1: 8,
+      phaseEndM0: 6,
+      phaseEndM1: 4,
+      phaseEndM1Plus: 2,
+    }
+
+    const sampleRow = orderedFields.map((field) => {
+      const header = PROJECT_LIST_COLUMN_MAP?.[field]?.[0]
+      const v = sampleByField[field]
+      if (v !== undefined) return v
+      // Some fields are mostly “nice to have”; leave empty if we don't have a safe example.
+      // But do include the header itself for clarity when auditing templates.
+      if (header === 'CS Type (VIBE)') return 'Bond'
+      return ''
+    })
+
+    const plAoa = [
+      plHeaders,
+      sampleRow,
+    ]
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(plAoa), 'Project List')
+
+    // ── Summary sheet (mandatory columns) ───────────────────────────────
+    const plReqHeaders = plHeaders
+    const dmReqHeaders = [
+      'VIBE Tag',
+      'Role',
+      'Project Start M0',
+      'Project Start M1',
+      'Project Mid',
+      'Project End M-1',
+      'Project End M0',
+      'Project End M1',
+      'Project End M1+',
+      'VIBE (Orbit multiplier)', // Y
+      'Orbit tier',              // Z
+      'Multiplier',              // AA
+    ]
+
+    const summaryAoa = [
+      ['SPARK Template — Required inputs'],
+      [''],
+      ['Required sheets'],
+      ['- Project List'],
+      ['- Demand Base Matrix'],
+      [''],
+      ['Project List — mandatory columns (exact header names)'],
+      ...plReqHeaders.map(h => [`- ${h}`]),
+      [''],
+      ['Demand Base Matrix — mandatory columns (exact header names)'],
+      ...dmReqHeaders.map(h => [`- ${h}`]),
+      [''],
+      ['Notes'],
+      ['- Orbit×VIBE multipliers must be provided in columns Y/Z/AA of Demand Base Matrix.'],
+      ['- CS&T Cluster is not required for engine insights/calculation, so it is not included in this template.'],
+    ]
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryAoa), 'Summary')
+
+    const dmHeaders = [
+      'VIBE Tag',
+      'Role',
+      'Project Start M0',
+      'Project Start M1',
+      'Project Mid',
+      'Project End M-1',
+      'Project End M0',
+      'Project End M1',
+      'Project End M1+',
+    ]
+    const makeRow = (left) => {
+      const row = new Array(27).fill('')
+      for (let i = 0; i < left.length; i++) row[i] = left[i]
+      return row
+    }
+
+    // Header row (A..I) plus Y/Z/AA labels for Orbit×VIBE multipliers.
+    const dmHeaderRow = makeRow(dmHeaders)
+    dmHeaderRow[24] = 'VIBE (Orbit multiplier)'
+    dmHeaderRow[25] = 'Orbit tier'
+    dmHeaderRow[26] = 'Multiplier'
+    const dmAoa = [dmHeaderRow]
+
+    // Example phase totals (left side) — a few rows
+    const phaseRow = (arr) => {
+      const row = makeRow(arr)
+      row[24] = '(phase totals row)'
+      row[25] = '—'
+      row[26] = '—'
+      return row
+    }
+    dmAoa.push(phaseRow(['Bond', 'CSM', 10, 12, 18, 8, 6, 4, 2]))
+    dmAoa.push(phaseRow(['Bond', 'PM', 8, 8, 12, 6, 4, 2, 1]))
+    dmAoa.push(phaseRow(['Bond', 'Analyst 1', 4, 6, 10, 5, 3, 2, 1]))
+
+    // Orbit×VIBE multipliers in columns Y/Z/AA (index 24/25/26).
+    // Provide the full 4×4 grid so CSM calculations have all keys.
+    const ORBITS = ['A', 'B', 'C', 'D']
+    const VIBES = ['Bond', 'Validate', 'Integrate', 'Explore']
+    let multBase = 1.2
+    for (const vibe of VIBES) {
+      for (const orbit of ORBITS) {
+        const row = makeRow(['', '', '', '', '', '', '', '', ''])
+        row[24] = vibe
+        row[25] = orbit
+        row[26] = +(multBase.toFixed(2))
+        multBase += 0.05
+        dmAoa.push(row)
+      }
+    }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dmAoa), 'Demand Base Matrix')
+
+    return wb
+  }, [])
+
+  const downloadTemplate = useCallback(() => {
+    try {
+      const out = XLSX.write(templateWb, { bookType: 'xlsx', type: 'array' })
+      const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'SPARK_Template.xlsx'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      // If the browser blocks downloads, user can still upload their own file.
+      console.error(e)
+    }
+  }, [templateWb])
 
   const handleDrop = useCallback((e) => {
     e.preventDefault()
@@ -161,6 +360,14 @@ export default function PlanView({
                 )}
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {typeof onGoToOverview === 'function' && (
+                  <button
+                    onClick={onGoToOverview}
+                    style={{ ...ghostBtn, background: 'var(--accent)', color: 'white', borderColor: 'transparent' }}
+                  >
+                    Go to Overview →
+                  </button>
+                )}
                 {base?.ingest && (
                   <button onClick={() => setManageOpen(true)} style={ghostBtn}>
                     Edit projects
@@ -188,6 +395,41 @@ export default function PlanView({
           <CardBody>
             <div style={{ textAlign: 'center', padding: '16px 0', color: C.muted, fontSize: 13 }}>
               No plan loaded yet. Upload an Excel file to get started.
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      {!!planIssues?.issues?.length && (
+        <Card style={{ marginBottom: 16, borderColor: 'rgba(220,38,38,0.25)' }}>
+          <CardHeader title="We couldn’t use that Excel file">
+            <Pill type="red">Fix required</Pill>
+          </CardHeader>
+          <CardBody>
+            <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+              Your workbook must include <strong>Project List</strong> and <strong>Demand Base Matrix</strong> sheets with the expected columns.
+              Download the template, copy your data into it, and re-upload.
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+              <button onClick={downloadTemplate} style={{ ...ghostBtn, background: 'var(--accent)', color: 'white', borderColor: 'transparent' }}>
+                Download template
+              </button>
+              {typeof onDismissPlanIssues === 'function' && (
+                <button onClick={onDismissPlanIssues} style={ghostBtn}>
+                  Dismiss
+                </button>
+              )}
+            </div>
+            <div style={{ fontSize: 12.5, color: C.ink }}>
+              <div style={{ fontWeight: 800, marginBottom: 6 }}>Issues found</div>
+              <ul style={{ margin: 0, paddingLeft: 18, color: C.muted }}>
+                {planIssues.issues.map((it, idx) => (
+                  <li key={idx} style={{ marginBottom: 4 }}>
+                    {it.message}
+                    {it.sheet ? <span style={{ color: C.faint }}> (Sheet: {it.sheet})</span> : null}
+                  </li>
+                ))}
+              </ul>
             </div>
           </CardBody>
         </Card>
@@ -239,6 +481,22 @@ export default function PlanView({
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 16 }}>
           Requires <strong>Project List</strong> and <strong>Demand Base Matrix</strong> sheets
         </div>
+        {!loading && (
+          <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); downloadTemplate() }}
+            style={{
+              ...ghostBtn,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              marginBottom: 10,
+            }}
+            title="Download a workbook with required sheets and headers"
+          >
+            Download template
+          </button>
+        )}
         {!loading && (
           <div style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
