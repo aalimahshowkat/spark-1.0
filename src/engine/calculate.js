@@ -602,6 +602,7 @@ export function computeCapacity({ planningYear = PLANNING_YEAR, roster = [], cap
   const hrsPerPersonMonthByMonth =
     capacityConfig?.hrsPerPersonMonthByMonth ||
     businessDaysByMonth.map(d => d * hrsPerPersonDay)
+  const hrsPerPersonMonthByMonthByRole = capacityConfig?.hrsPerPersonMonthByMonthByRole || null
 
   const fteCount = capacityConfig?.fteCount || getFteCountFromRoster(roster)
   const attritionGlobal = capacityConfig?.attritionGlobal ?? ATTRITION_FACTOR
@@ -610,7 +611,8 @@ export function computeCapacity({ planningYear = PLANNING_YEAR, roster = [], cap
   for (const role of PRIMARY_ROLES) {
     // Analyst 2 does NOT add capacity. Its demand is incremental pressure.
     const fte = role === 'Analyst 2' ? 0 : (fteCount[role] || 0)
-    const rawMonthlyByMonth = hrsPerPersonMonthByMonth.map(h => h * fte)
+    const monthArr = (hrsPerPersonMonthByMonthByRole && hrsPerPersonMonthByMonthByRole[role]) || hrsPerPersonMonthByMonth
+    const rawMonthlyByMonth = monthArr.map(h => h * fte)
     const attrition = (attritionByRole && attritionByRole[role] !== undefined && attritionByRole[role] !== null)
       ? attritionByRole[role]
       : attritionGlobal
@@ -629,8 +631,8 @@ export function computeCapacity({ planningYear = PLANNING_YEAR, roster = [], cap
       attritionFactor:  attrition,
       hrsPerPersonDay,
       businessDaysByMonth,
-      hrsPerPersonMonth: (hrsPerPersonMonthByMonth.reduce((a, b) => a + (b || 0), 0) / 12),
-      hrsPerPersonMonthByMonth,
+      hrsPerPersonMonth: (monthArr.reduce((a, b) => a + (b || 0), 0) / 12),
+      hrsPerPersonMonthByMonth: monthArr,
     }
   }
 

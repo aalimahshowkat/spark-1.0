@@ -265,16 +265,15 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
       </KpiStrip>
 
       {/* Insight chips */}
-      <div style={{ display:'flex', gap:12, flexWrap:'wrap', marginBottom:20 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(260px, 1fr))', gap:12, marginBottom:20 }}>
         {[
           { icon:'🔴', title:'Sep peak is critical', body:'All 3 roles breach capacity in Sep — highest collision month of the year' },
           { icon:'📦', title:'Bond projects dominate', body:`${vibeProjectCountsSafe.Bond} of ${totalProjects} projects (${totalProjects ? ((vibeProjectCountsSafe.Bond/totalProjects)*100).toFixed(0) : '0'}%) are Bond engagements` },
-          { icon:'⚠️', title:'SE hours unassigned', body:`SE shows ${viewData?.unassigned?.CSM?.[0] || 0}+ hrs unassigned in Jan — resourcing gap needs action` },
         ].map(({ icon, title, body }) => (
           <div key={title} style={{
             background:'white', border:'1px solid var(--rule)', borderRadius:8,
             padding:'10px 14px', display:'flex', alignItems:'center',
-            gap:8, flex:1, minWidth:220
+            gap:8, minWidth:0
           }}>
             <span style={{ fontSize:18 }}>{icon}</span>
             <div>

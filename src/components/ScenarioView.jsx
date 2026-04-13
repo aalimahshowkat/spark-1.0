@@ -12,7 +12,7 @@
  *   'compare' — baseline vs scenario delta view
  */
 
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Bar } from 'react-chartjs-2'
 import { useScenario } from './useScenario.js'
 import { buildScenarioCapacityConfig, computeCapacityScenario, getScenarioSummary, ALL_ROLES } from '../engine/scenarioEngine.js'
@@ -246,6 +246,7 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
           overrides={editDraft.projectOverrides}
           onPatch={patchDraftProject}
           onRemove={removeDraftProject}
+          roster={baselineIngest?.roster || []}
         />
       )}
       {tab === 'resources'   && (
@@ -299,9 +300,70 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
 // PROJECT OVERRIDES TAB
 // ─────────────────────────────────────────────────────────────────────────
 
-function ProjectOverridesTab({ projects, overrides, onPatch, onRemove }) {
+function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = [] }) {
   const [search, setSearch] = useState('')
   const [showOverridesOnly, setShowOverridesOnly] = useState(false)
+  const scrollRef = useRef(null)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (ev) => {
+      // When the pointer is over a native <select>, trackpad/wheel often changes the
+      // selection instead of scrolling the list. Force scrolling the list instead.
+      const t = ev.target
+      if (!(t instanceof Element)) return
+      const inSelect = t.tagName === 'SELECT' || !!t.closest('select')
+      if (!inSelect) return
+      if (ev.cancelable) ev.preventDefault()
+      el.scrollTop += ev.deltaY
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
+
+  const rosterByRole = useMemo(() => {
+    const norm = (s) => String(s || '').trim()
+    const add = (map, role, name) => {
+      const r = norm(role)
+      const n = norm(name)
+      if (!r || !n) return
+      if (!map[r]) map[r] = new Set()
+      map[r].add(n)
+    }
+    const map = {}
+    for (const p of Array.isArray(roster) ? roster : []) {
+      const role = norm(p?.role)
+      const name = norm(p?.name)
+      if (!role || !name) continue
+      // Allow "Analyst" shorthand for Analyst 1.
+      add(map, role === 'Analyst' ? 'Analyst 1' : role, name)
+    }
+    // Also seed from existing assignments to preserve back-compat.
+    for (const pr of Array.isArray(projects) ? projects : []) {
+      add(map, 'CSM', pr?.assignedCSM)
+      add(map, 'PM', pr?.assignedPM)
+      add(map, 'SE', pr?.assignedSE)
+      add(map, 'Analyst 1', pr?.assignedAnalyst1)
+      add(map, 'Analyst 2', pr?.assignedAnalyst2)
+    }
+
+    // If the roster doesn't distinguish Analyst 1 vs Analyst 2, keep suggestions usable by
+    // offering the unified analyst pool for both fields.
+    const a1 = map['Analyst 1'] || new Set()
+    const a2 = map['Analyst 2'] || new Set()
+    const analystUnion = new Set([...a1, ...a2])
+    if (analystUnion.size) {
+      map['Analyst 1'] = analystUnion
+      map['Analyst 2'] = analystUnion
+    }
+
+    const out = {}
+    for (const [role, set] of Object.entries(map)) {
+      out[role] = [...set].sort((a, b) => a.localeCompare(b))
+    }
+    return out
+  }, [roster, projects])
 
   const filtered = useMemo(() => {
     return projects.filter(p => {
@@ -331,6 +393,11 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove }) {
           <input type="checkbox" checked={showOverridesOnly} onChange={e => setShowOverridesOnly(e.target.checked)} />
           Show modified only
         </label>
+        {showOverridesOnly && (
+          <div style={{ fontSize: 11, color: C.faint }}>
+            Tip: uncheck to edit multiple projects.
+          </div>
+        )}
         {overrideCount > 0 && (
           <div style={{ marginLeft: 'auto', fontSize: 11, color: C.accent, fontWeight: 600 }}>
             {overrideCount} project{overrideCount !== 1 ? 's' : ''} overridden
@@ -338,7 +405,11 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove }) {
         )}
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 460, overflowY: 'auto' }}>
+      <div
+        ref={scrollRef}
+        data-spark-scroll="project-overrides"
+        style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 460, overflowY: 'auto' }}
+      >
         {filtered.map(p => (
           <ProjectOverrideRow
             key={p.id}
@@ -346,6 +417,7 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove }) {
             override={overrides[p.id] || null}
             onPatch={patch => onPatch(p.id, patch)}
             onClear={() => onRemove(p.id)}
+            rosterByRole={rosterByRole}
           />
         ))}
         {filtered.length === 0 && (
@@ -358,7 +430,7 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove }) {
   )
 }
 
-function ProjectOverrideRow({ project, override, onPatch, onClear }) {
+function ProjectOverrideRow({ project, override, onPatch, onClear, rosterByRole }) {
   const [open, setOpen] = useState(!!override)
   const hasOverride = !!override && Object.keys(override).filter(k => override[k] !== undefined && override[k] !== false).length > 0
   const isExcluded = override?.exclude === true
@@ -385,6 +457,30 @@ function ProjectOverrideRow({ project, override, onPatch, onClear }) {
         <span style={{ fontSize: 10.5, color: C.muted, flexShrink: 0 }}>{project.vibeType}</span>
         {hasOverride && !isExcluded && <SmallBadge color={C.accent}>Modified</SmallBadge>}
         {isExcluded && <SmallBadge color={C.red}>Excluded</SmallBadge>}
+        {hasOverride && (
+          <button
+            title="Clear all overrides"
+            onClick={(e) => {
+              e.stopPropagation()
+              onClear?.()
+            }}
+            style={{
+              marginLeft: 6,
+              background: 'var(--red-light)',
+              border: '1px solid #fecaca',
+              color: '#991b1b',
+              borderRadius: 6,
+              padding: '2px 8px',
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+              lineHeight: 1.4,
+            }}
+          >
+            Clear
+          </button>
+        )}
       </div>
 
       {/* Override form */}
@@ -470,59 +566,49 @@ function ProjectOverrideRow({ project, override, onPatch, onClear }) {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <FieldGroup label={`CSM (baseline: ${project.assignedCSM || 'Unassigned'})`}>
-                  <input
-                    value={override?.assignedCSM ?? ''}
-                    onChange={e => onPatch({ assignedCSM: e.target.value === '' ? null : e.target.value })}
-                    placeholder="Type name to override, blank = Unassigned"
-                    style={inputStyle()}
+                  <RosterAssignmentPicker
+                    role="CSM"
+                    baselineName={project.assignedCSM || ''}
+                    overrideValue={override?.assignedCSM}
+                    options={rosterByRole?.CSM || []}
+                    onChange={(v) => onPatch({ assignedCSM: v })}
                   />
-                  {override?.assignedCSM !== undefined && (
-                    <SmallInlineBtn onClick={() => onPatch({ assignedCSM: undefined })}>Clear override</SmallInlineBtn>
-                  )}
                 </FieldGroup>
                 <FieldGroup label={`PM (baseline: ${project.assignedPM || 'Unassigned'})`}>
-                  <input
-                    value={override?.assignedPM ?? ''}
-                    onChange={e => onPatch({ assignedPM: e.target.value === '' ? null : e.target.value })}
-                    placeholder="Type name to override, blank = Unassigned"
-                    style={inputStyle()}
+                  <RosterAssignmentPicker
+                    role="PM"
+                    baselineName={project.assignedPM || ''}
+                    overrideValue={override?.assignedPM}
+                    options={rosterByRole?.PM || []}
+                    onChange={(v) => onPatch({ assignedPM: v })}
                   />
-                  {override?.assignedPM !== undefined && (
-                    <SmallInlineBtn onClick={() => onPatch({ assignedPM: undefined })}>Clear override</SmallInlineBtn>
-                  )}
                 </FieldGroup>
                 <FieldGroup label={`Analyst 1 (baseline: ${project.assignedAnalyst1 || 'Unassigned'})`}>
-                  <input
-                    value={override?.assignedAnalyst1 ?? ''}
-                    onChange={e => onPatch({ assignedAnalyst1: e.target.value === '' ? null : e.target.value })}
-                    placeholder="Type name to override, blank = Unassigned"
-                    style={inputStyle()}
+                  <RosterAssignmentPicker
+                    role="Analyst 1"
+                    baselineName={project.assignedAnalyst1 || ''}
+                    overrideValue={override?.assignedAnalyst1}
+                    options={rosterByRole?.['Analyst 1'] || []}
+                    onChange={(v) => onPatch({ assignedAnalyst1: v })}
                   />
-                  {override?.assignedAnalyst1 !== undefined && (
-                    <SmallInlineBtn onClick={() => onPatch({ assignedAnalyst1: undefined })}>Clear override</SmallInlineBtn>
-                  )}
                 </FieldGroup>
                 <FieldGroup label={`Analyst 2 (baseline: ${project.assignedAnalyst2 || 'Unassigned'})`}>
-                  <input
-                    value={override?.assignedAnalyst2 ?? ''}
-                    onChange={e => onPatch({ assignedAnalyst2: e.target.value === '' ? null : e.target.value })}
-                    placeholder="Type name to override, blank = Unassigned"
-                    style={inputStyle()}
+                  <RosterAssignmentPicker
+                    role="Analyst 2"
+                    baselineName={project.assignedAnalyst2 || ''}
+                    overrideValue={override?.assignedAnalyst2}
+                    options={rosterByRole?.['Analyst 2'] || []}
+                    onChange={(v) => onPatch({ assignedAnalyst2: v })}
                   />
-                  {override?.assignedAnalyst2 !== undefined && (
-                    <SmallInlineBtn onClick={() => onPatch({ assignedAnalyst2: undefined })}>Clear override</SmallInlineBtn>
-                  )}
                 </FieldGroup>
                 <FieldGroup label={`SE (baseline: ${project.assignedSE || 'Unassigned'})`}>
-                  <input
-                    value={override?.assignedSE ?? ''}
-                    onChange={e => onPatch({ assignedSE: e.target.value === '' ? null : e.target.value })}
-                    placeholder="Type name to override, blank = Unassigned"
-                    style={inputStyle()}
+                  <RosterAssignmentPicker
+                    role="SE"
+                    baselineName={project.assignedSE || ''}
+                    overrideValue={override?.assignedSE}
+                    options={rosterByRole?.SE || []}
+                    onChange={(v) => onPatch({ assignedSE: v })}
                   />
-                  {override?.assignedSE !== undefined && (
-                    <SmallInlineBtn onClick={() => onPatch({ assignedSE: undefined })}>Clear override</SmallInlineBtn>
-                  )}
                 </FieldGroup>
                 <FieldGroup label={`Analyst 1 load % (baseline: ${Number.isFinite(+project.analystUtilPct) ? project.analystUtilPct : '—'})`}>
                   <input
@@ -649,15 +735,35 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
     if (!Array.isArray(arr) || arr.length !== 12) return HRS_PER_PERSON_MONTH
     return arr.reduce((a, b) => a + (b || 0), 0) / 12
   }, [baselineCfg])
+  const baselineRange = useMemo(() => {
+    const arr = baselineCfg?.hrsPerPersonMonthByMonth
+    if (!Array.isArray(arr) || arr.length !== 12) return { min: HRS_PER_PERSON_MONTH, max: HRS_PER_PERSON_MONTH }
+    const vals = arr.map(v => (Number.isFinite(+v) ? +v : 0))
+    return { min: Math.min(...vals), max: Math.max(...vals) }
+  }, [baselineCfg])
+  const hrsSliderStep = 8
+  const hrsSliderMin = 80
+  const hrsSliderMax = useMemo(() => {
+    // Always allow adjusting above calendar baseline.
+    const baseMax = Number.isFinite(+baselineRange.max) ? +baselineRange.max : HRS_PER_PERSON_MONTH
+    const padded = baseMax + 48
+    const snapped = Math.ceil(padded / hrsSliderStep) * hrsSliderStep
+    return Math.max(300, snapped)
+  }, [baselineRange])
+  const avgBusinessDaysPerMonth = useMemo(() => {
+    // Baseline is business-days × 10 hrs/day, so avgBusinessDays ≈ baselineAvg / 10.
+    const v = Number(baselineAvgHrsPerPersonMo) / 10
+    return Number.isFinite(v) && v > 0 ? v : 0
+  }, [baselineAvgHrsPerPersonMo])
 
   const fields = [
     {
-      key: 'hrsPerPersonMonth',
-      label: 'Working hours per person per month',
-      desc: 'Baseline is calendar-aware (business-days × 10 hrs/day) and varies by month. This override sets a constant hours/month for all months.',
-      baseline: baselineAvgHrsPerPersonMo,
-      step: 8, min: 80, max: 200,
-      format: v => `${v}h`,
+      key: 'hrsPerPersonDay',
+      label: 'Working hours per person per business day',
+      desc: 'Baseline is calendar-aware (business-days × 10 hrs/day). This override models up to 12 hrs/day while preserving the calendar.',
+      baseline: 10,
+      step: 0.5, min: 6, max: 12,
+      format: v => `${v}h/day`,
     },
   ]
 
@@ -694,9 +800,12 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {fields.map(f => {
-          const current = overrides[f.key]
-          const hasOverride = current !== undefined && current !== null
-          const displayVal = hasOverride ? current : f.baseline
+          const hasOverride = overrides?.hrsPerPersonDay !== undefined && overrides?.hrsPerPersonDay !== null
+          const displayVal = hasOverride
+            ? Number(overrides.hrsPerPersonDay)
+            : (overrides?.hrsPerPersonMonth !== undefined && overrides?.hrsPerPersonMonth !== null && avgBusinessDaysPerMonth)
+              ? (Number(overrides.hrsPerPersonMonth) / avgBusinessDaysPerMonth)
+              : f.baseline
 
           return (
             <div key={f.key} style={{
@@ -706,12 +815,15 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
             }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: C.ink, marginBottom: 3 }}>{f.label}</div>
               <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10, lineHeight: 1.5 }}>{f.desc}</div>
+              <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                Baseline: <strong>10.0h/day</strong>. (Calendar-aware business days.) Max: <strong>12.0h/day</strong>.
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <input
                   type="range"
                   min={f.min} max={f.max} step={f.step}
                   value={displayVal}
-                  onChange={e => onPatch({ [f.key]: parseFloat(e.target.value) })}
+                  onChange={e => onPatch({ hrsPerPersonDay: parseFloat(e.target.value), hrsPerPersonMonth: undefined })}
                   style={{ flex: 1, accentColor: 'var(--accent)' }}
                 />
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600, width: 48, color: hasOverride ? C.accent : C.ink }}>
@@ -724,7 +836,7 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
                 )}
               </div>
               {hasOverride && (
-                <button onClick={() => onPatch({ [f.key]: undefined })} style={{ ...btnStyle('danger-sm'), marginTop: 8 }}>
+                <button onClick={() => onPatch({ hrsPerPersonDay: undefined, hrsPerPersonMonth: undefined })} style={{ ...btnStyle('danger-sm'), marginTop: 8 }}>
                   Reset to baseline
                 </button>
               )}
@@ -732,6 +844,65 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
           )
         })}
       </div>
+
+      {/* Per-role working hours overrides */}
+      <Card style={{ marginTop: 14 }}>
+        <CardHeader title="Working hours per person per business day (by role)">
+          <Tag>Capacity only</Tag>
+        </CardHeader>
+        <CardBody>
+          <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+            Optional. Set role-specific hours/day. These <strong>override</strong> the global hours/day setting above for that role.
+          </div>
+          {(['CSM', 'PM', 'Analyst 1']).map(roleKey => {
+            const byRole = overrides?.hrsPerPersonDayByRole || {}
+            const current = byRole?.[roleKey]
+            const has = current !== undefined && current !== null && current !== ''
+
+            const apply = (nextVal) => {
+              const obj = { ...(overrides?.hrsPerPersonDayByRole || {}) }
+              if (nextVal === undefined || nextVal === null || nextVal === '') {
+                delete obj[roleKey]
+              } else {
+                obj[roleKey] = nextVal
+              }
+              onPatch({ hrsPerPersonDayByRole: obj })
+            }
+
+            return (
+              <div key={roleKey} style={{
+                padding: '12px 14px',
+                borderRadius: 8,
+                border: `1px solid ${has ? C.accent : C.border}`,
+                background: has ? 'var(--accent-light)' : C.surface,
+                marginBottom: 10,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ width: 90, fontWeight: 700, fontSize: 12.5, color: C.ink }}>{roleKey}</div>
+                  <input
+                    type="number"
+                    min={6}
+                    max={12}
+                    step={0.5}
+                    value={has ? Number(current) : ''}
+                    placeholder="10.0"
+                    onChange={e => apply(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                    style={{ ...inputStyle(), width: 90 }}
+                  />
+                  {has && (
+                    <button onClick={() => apply(undefined)} style={btnStyle('danger-sm')}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+                  Baseline: 10.0h/day. Calendar-aware business days are preserved.
+                </div>
+              </div>
+            )
+          })}
+        </CardBody>
+      </Card>
 
       {/* LM Bucket multipliers */}
       <Card style={{ marginTop: 14 }}>
@@ -1765,6 +1936,166 @@ function FieldGroup({ label, children }) {
         {label}
       </div>
       {children}
+    </div>
+  )
+}
+
+function RosterAssignmentPicker({ role, baselineName, overrideValue, options, onChange }) {
+  const [mode, setMode] = useState(() => {
+    const v = overrideValue
+    if (v === undefined) return 'baseline'
+    if (v === null) return 'unassigned'
+    const s = String(v || '').trim()
+    if (!s) return 'unassigned'
+    const isKnown = Array.isArray(options) && options.includes(s)
+    return isKnown ? 'pick' : 'custom'
+  })
+  const [custom, setCustom] = useState(() => {
+    const v = overrideValue
+    if (v === undefined || v === null) return ''
+    const s = String(v || '').trim()
+    if (!s) return ''
+    const isKnown = Array.isArray(options) && options.includes(s)
+    return isKnown ? '' : s
+  })
+
+  const effectiveMode = (() => {
+    // Keep mode coherent if overrideValue changes externally.
+    if (overrideValue === undefined) return 'baseline'
+    if (overrideValue === null) return 'unassigned'
+    const s = String(overrideValue || '').trim()
+    if (!s) return 'unassigned'
+    const isKnown = Array.isArray(options) && options.includes(s)
+    return isKnown ? 'pick' : 'custom'
+  })()
+
+  // If props changed (switching projects), reset local state.
+  useEffect(() => {
+    setMode(effectiveMode)
+    const v = overrideValue
+    if (v === undefined || v === null) {
+      setCustom('')
+      return
+    }
+    const s = String(v || '').trim()
+    if (!s) {
+      setCustom('')
+      return
+    }
+    const isKnown = Array.isArray(options) && options.includes(s)
+    setCustom(isKnown ? '' : s)
+  }, [effectiveMode, overrideValue, options, role, baselineName])
+
+  const currentPick = (() => {
+    const v = overrideValue
+    if (v === undefined || v === null) return ''
+    const s = String(v || '').trim()
+    if (!s) return ''
+    return s
+  })()
+  const isKnownPick = Array.isArray(options) && currentPick && options.includes(currentPick)
+  const isCustomPick = !!currentPick && !isKnownPick
+
+  const baseLabel = baselineName ? `Keep baseline: ${baselineName}` : 'Keep baseline'
+
+  const setOverride = (val) => {
+    onChange?.(val)
+  }
+
+  const handleSelect = (v) => {
+    if (v === '__baseline__') {
+      setMode('baseline')
+      setCustom('')
+      setOverride(undefined)
+      return
+    }
+    if (v === '__unassigned__') {
+      setMode('unassigned')
+      setCustom('')
+      setOverride(null)
+      return
+    }
+    if (v === '__custom__') {
+      setMode('custom')
+      // Do not write override yet; wait for explicit custom value.
+      return
+    }
+    // known name
+    setMode('pick')
+    setCustom('')
+    setOverride(v)
+  }
+
+  const commitCustom = () => {
+    const s = String(custom || '').trim()
+    if (!s) {
+      setMode('unassigned')
+      setOverride(null)
+      return
+    }
+    setOverride(s)
+  }
+
+  const routeWheelToList = (e) => {
+    // Native selects often consume wheel/trackpad gestures (changing option)
+    // and the surrounding list feels "frozen". Always route wheel to the list scroller.
+    const scroller = e.currentTarget.closest('[data-spark-scroll="project-overrides"]')
+    if (!scroller) return
+    // Prevent the select from changing selection on scroll.
+    e.preventDefault()
+    e.stopPropagation()
+    scroller.scrollTop += e.deltaY
+  }
+
+  return (
+    <div>
+      <select
+        value={
+          mode === 'baseline' ? '__baseline__' :
+          mode === 'unassigned' ? '__unassigned__' :
+          (mode === 'custom' && isCustomPick) ? currentPick :
+          (currentPick || '')
+        }
+        onChange={e => handleSelect(e.target.value)}
+        style={inputStyle()}
+      >
+        <option value="__baseline__">{baseLabel}</option>
+        <option value="__unassigned__">Unassigned</option>
+        {isCustomPick && (
+          <option value={currentPick}>
+            {`Custom: ${currentPick}`}
+          </option>
+        )}
+        {(Array.isArray(options) ? options : []).map(n => (
+          <option key={n} value={n}>{n}</option>
+        ))}
+        <option value="__custom__">Other…</option>
+      </select>
+
+      {mode === 'custom' && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+          <input
+            value={custom}
+            onChange={e => setCustom(e.target.value)}
+            onBlur={commitCustom}
+            placeholder="Type a new name"
+            style={inputStyle({ flex: 1 })}
+          />
+          <button onClick={commitCustom} style={btnStyle('primary')}>
+            Apply
+          </button>
+        </div>
+      )}
+
+      {overrideValue !== undefined && (
+        <SmallInlineBtn onClick={() => setOverride(undefined)}>
+          Clear override
+        </SmallInlineBtn>
+      )}
+
+      <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6, lineHeight: 1.4 }}>
+        Pick from roster to keep names consistent. Use “Other…” only for intentionally new people.
+      </div>
     </div>
   )
 }

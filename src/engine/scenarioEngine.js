@@ -265,13 +265,55 @@ export function buildScenarioCapacityConfig({
   }
 
   const businessDaysByMonth = getBusinessDaysByMonth(planningYear)
-  const hrsPerPersonDay = 10
-  const hasHrsOverride =
+  const BASELINE_HRS_PER_PERSON_DAY = 10
+  const globalHrsPerPersonDay =
+    (assumptionOverrides?.hrsPerPersonDay !== undefined && assumptionOverrides?.hrsPerPersonDay !== null)
+      ? Number(assumptionOverrides.hrsPerPersonDay)
+      : BASELINE_HRS_PER_PERSON_DAY
+  const hrsPerPersonDay = (Number.isFinite(globalHrsPerPersonDay) && globalHrsPerPersonDay > 0)
+    ? globalHrsPerPersonDay
+    : BASELINE_HRS_PER_PERSON_DAY
+
+  const baselineHrsPerPersonMonthByMonth = businessDaysByMonth.map(d => d * BASELINE_HRS_PER_PERSON_DAY)
+
+  // Legacy/global override: constant hours per month across the year.
+  // New/global override: hours per business day (calendar-aware by month).
+  const hasGlobalMonthOverride =
     assumptionOverrides?.hrsPerPersonMonth !== undefined &&
     assumptionOverrides?.hrsPerPersonMonth !== null
-  const hrsPerPersonMonthByMonth = hasHrsOverride
-    ? new Array(12).fill(assumptionOverrides.hrsPerPersonMonth)
-    : businessDaysByMonth.map(d => d * hrsPerPersonDay)
+  const hasGlobalDayOverride =
+    assumptionOverrides?.hrsPerPersonDay !== undefined &&
+    assumptionOverrides?.hrsPerPersonDay !== null
+
+  const hrsPerPersonMonthByMonth = hasGlobalDayOverride
+    ? businessDaysByMonth.map(d => d * hrsPerPersonDay)
+    : hasGlobalMonthOverride
+      ? new Array(12).fill(Number(assumptionOverrides.hrsPerPersonMonth))
+      : baselineHrsPerPersonMonthByMonth
+
+  // Per-role overrides (preferred): hours/day by role (calendar-aware by month).
+  // Back-compat: constant hours/month by role.
+  const hrsPerPersonMonthByMonthByRole = {}
+
+  const hrsDayByRoleRaw = assumptionOverrides?.hrsPerPersonDayByRole || {}
+  if (hrsDayByRoleRaw && typeof hrsDayByRoleRaw === 'object') {
+    for (const [role, value] of Object.entries(hrsDayByRoleRaw)) {
+      const num = Number(value)
+      if (!Number.isFinite(num) || num <= 0) continue
+      const key = role === 'Analyst' ? 'Analyst 1' : role
+      hrsPerPersonMonthByMonthByRole[key] = businessDaysByMonth.map(d => d * num)
+    }
+  } else {
+    const hrsMonthByRoleRaw = assumptionOverrides?.hrsPerPersonMonthByRole || {}
+    if (hrsMonthByRoleRaw && typeof hrsMonthByRoleRaw === 'object') {
+      for (const [role, value] of Object.entries(hrsMonthByRoleRaw)) {
+        const num = Number(value)
+        if (!Number.isFinite(num) || num <= 0) continue
+        const key = role === 'Analyst' ? 'Analyst 1' : role
+        hrsPerPersonMonthByMonthByRole[key] = new Array(12).fill(num)
+      }
+    }
+  }
 
   const attritionGlobal = assumptionOverrides?.attritionFactor ?? ATTRITION_FACTOR
   const attritionByRole = { ...(attritionOverrides || {}) }
@@ -288,6 +330,7 @@ export function buildScenarioCapacityConfig({
     hrsPerPersonDay,
     businessDaysByMonth,
     hrsPerPersonMonthByMonth,
+    hrsPerPersonMonthByMonthByRole: Object.keys(hrsPerPersonMonthByMonthByRole).length ? hrsPerPersonMonthByMonthByRole : null,
   }
 }
 
@@ -303,6 +346,7 @@ export function computeCapacityScenario(scenarioCapacityConfig) {
     hrsPerPersonDay,
     businessDaysByMonth,
     hrsPerPersonMonthByMonth,
+    hrsPerPersonMonthByMonthByRole,
   } = scenarioCapacityConfig
   const result = {}
 
@@ -313,7 +357,10 @@ export function computeCapacityScenario(scenarioCapacityConfig) {
       ? attritionByRole[role]
       : attritionGlobal
 
-    const monthArr = hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+    const monthArr =
+      (hrsPerPersonMonthByMonthByRole && hrsPerPersonMonthByMonthByRole[role]) ||
+      hrsPerPersonMonthByMonth ||
+      new Array(12).fill(HRS_PER_PERSON_MONTH)
     const rawMonthlyByMonth = monthArr.map(h => h * fte)
     const effectiveMonthlyByMonth = rawMonthlyByMonth.map(v => v * attrition)
     const rawAnn = rawMonthlyByMonth.reduce((a, b) => a + (b || 0), 0)
