@@ -14,6 +14,7 @@ import ExportsView       from './components/ExportsView'
 import ScenarioView      from './components/ScenarioView'
 import SparkAiView       from './components/SparkAiView'
 import SparkAssistantWidget from './components/SparkAssistantWidget'
+import LoginView         from './components/LoginView'
 import { useEngineCalc } from './components/useEngineCalc'
 import { usePersistedBaseDataset } from './components/usePersistedBaseDataset'
 import { validateSparkWorkbookFile } from './engine/workbookValidator.js'
@@ -72,7 +73,7 @@ export const NAV = [
   }] : []),
 ]
 
-export default function App() {
+function AppInner({ onLogout }) {
   const [activeTab,    setActiveTab]    = useState('plan')
   const [data,         setData]         = useState(null)
   const [loading,      setLoading]      = useState(false)
@@ -189,7 +190,7 @@ export default function App() {
       <Sidebar nav={NAV} active={activeTab} onNav={handleNav} isEnabled={isTabEnabled} fileName={fileName} />
 
       <div style={{ flex:1, display:'flex', flexDirection:'column', minWidth:0, marginLeft:'var(--sidebar-w)' }}>
-        <TopBar onUpload={handleFile} fileName={fileName} activeTab={activeTab} loading={loading} />
+        <TopBar onUpload={handleFile} fileName={fileName} activeTab={activeTab} loading={loading} onLogout={onLogout} />
 
         <main style={{ flex:1, padding:'28px 36px', width:'100%', maxWidth:'none' }}>
           {error    && <Banner type="error"  msg={error}  onDismiss={() => setError(null)} />}
@@ -270,6 +271,90 @@ export default function App() {
       <SparkAssistantWidget engineCalc={engineCalc} engineInput={engineInput} planName={planName} />
     </div>
   )
+}
+
+export default function App() {
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authRequired, setAuthRequired] = useState(false)
+  const [authenticated, setAuthenticated] = useState(false)
+  const [authError, setAuthError] = useState(null)
+  const [loginBusy, setLoginBusy] = useState(false)
+
+  const refreshAuth = useCallback(async () => {
+    try {
+      const r = await fetch('/api/auth/status', { headers: { 'Accept': 'application/json' } })
+      const j = await r.json().catch(() => null)
+      const required = !!j?.authRequired
+      const authed = !!j?.authenticated
+      setAuthRequired(required)
+      setAuthenticated(authed || !required)
+      setAuthError(null)
+    } catch (e) {
+      // Auth is a hard gate when enabled; if the service is unreachable, block with a friendly message.
+      setAuthRequired(true)
+      setAuthenticated(false)
+      setAuthError('Login service unavailable. Please start the SPARK proxy server.')
+    } finally {
+      setAuthLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshAuth()
+  }, [refreshAuth])
+
+  const handleLogin = useCallback(async ({ username, password }) => {
+    setLoginBusy(true)
+    setAuthError(null)
+    try {
+      const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      if (!r.ok) {
+        setAuthError('Invalid username or password.')
+        return
+      }
+      const j = await r.json().catch(() => null)
+      if (!j?.authenticated) {
+        setAuthError('Invalid username or password.')
+        return
+      }
+      await refreshAuth()
+    } catch (e) {
+      setAuthError('Could not reach login service.')
+    } finally {
+      setLoginBusy(false)
+    }
+  }, [refreshAuth])
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', headers: { 'Accept': 'application/json' } })
+    } catch (e) {
+      // ignore
+    } finally {
+      await refreshAuth()
+    }
+  }, [refreshAuth])
+
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-base)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-muted)', fontSize: 13 }}>
+          <div style={{ width: 14, height: 14, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+          Checking session…
+        </div>
+      </div>
+    )
+  }
+
+  if (authRequired && !authenticated) {
+    return <LoginView busy={loginBusy} error={authError} onLogin={handleLogin} />
+  }
+
+  return <AppInner onLogout={authRequired ? handleLogout : null} />
 }
 
 // ── Nudge banner for unsaved uploads ─────────────────────────────────────

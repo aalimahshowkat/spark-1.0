@@ -30,7 +30,7 @@ const TAB_SUBTITLES = {
   ai:         'AI-powered capacity intelligence · grounded in your plan data',
 }
 
-export default function TopBar({ onUpload, fileName, activeTab, loading }) {
+export default function TopBar({ onUpload, fileName, activeTab, loading, onLogout }) {
   const ref = useRef()
 
   const handleChange = (e) => {
@@ -65,6 +65,30 @@ export default function TopBar({ onUpload, fileName, activeTab, loading }) {
 
       {/* Right controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              padding: '7px 12px', borderRadius: 7,
+              background: 'transparent',
+              color: 'var(--ink-muted)',
+              border: '1px solid var(--border)',
+              fontFamily: 'var(--font-sans)', fontSize: 12.5, fontWeight: 700,
+              cursor: 'pointer', transition: 'all 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-1)' }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+            title="Logout"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <path d="M16 17l5-5-5-5"/>
+              <path d="M21 12H9"/>
+            </svg>
+            Logout
+          </button>
+        )}
         {loading && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--ink-muted)' }}>
             <div style={{ width: 14, height: 14, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />

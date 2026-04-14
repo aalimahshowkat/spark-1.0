@@ -99,6 +99,10 @@ function getLoginPassword() {
   return String(getEnvVar('SPARK_LOGIN_PASSWORD') || '').trim()
 }
 
+function getLoginUsername() {
+  return String(getEnvVar('SPARK_LOGIN_USERNAME') || '').trim()
+}
+
 function parseCookies(header) {
   const out = {}
   if (!header) return out
@@ -185,9 +189,13 @@ app.post('/api/auth/login', (req, res) => {
   if (!isAuthEnabled()) return res.json({ ok: true, authenticated: true, user: { name: 'local' } })
 
   const { username, password } = req.body || {}
+  const expectedUser = getLoginUsername()
   const expected = getLoginPassword()
   if (!expected) return res.status(500).json({ error: 'auth_misconfigured' })
 
+  if (expectedUser && String(username || '').trim() !== expectedUser) {
+    return res.status(401).json({ error: 'invalid_credentials' })
+  }
   if (String(password || '') !== expected) {
     return res.status(401).json({ error: 'invalid_credentials' })
   }
