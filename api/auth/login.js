@@ -1,4 +1,4 @@
-import { isAuthEnabled, getLoginPassword, getSessionSecret, signSession, makeSetCookie, readJson, SESSION_COOKIE } from '../_utils.js'
+import { isAuthEnabled, getLoginUsername, getLoginPassword, getSessionSecret, signSession, makeSetCookie, readJson, SESSION_COOKIE } from '../_utils.js'
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -12,6 +12,7 @@ export default async function handler(req, res) {
     return res.end(JSON.stringify({ ok: true, authenticated: true, user: { name: 'local' } }))
   }
 
+  const expectedUser = getLoginUsername()
   const expected = getLoginPassword()
   const secret = getSessionSecret()
   if (!expected || !secret) {
@@ -21,9 +22,15 @@ export default async function handler(req, res) {
   }
 
   const body = await readJson(req)
-  const username = String(body?.username || 'user').slice(0, 80)
+  const usernameRaw = String(body?.username || '')
+  const username = String(usernameRaw).trim().slice(0, 80)
   const password = String(body?.password || '')
 
+  if (expectedUser && username !== expectedUser) {
+    res.setHeader('Content-Type', 'application/json')
+    res.statusCode = 401
+    return res.end(JSON.stringify({ error: 'invalid_credentials' }))
+  }
   if (password !== expected) {
     res.setHeader('Content-Type', 'application/json')
     res.statusCode = 401

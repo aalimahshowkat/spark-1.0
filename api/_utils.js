@@ -31,6 +31,10 @@ export function getLoginPassword() {
   return String(process.env.SPARK_LOGIN_PASSWORD || '').trim()
 }
 
+export function getLoginUsername() {
+  return String(process.env.SPARK_LOGIN_USERNAME || '').trim()
+}
+
 export function getSessionSecret() {
   // Required for stateless sessions on serverless.
   return String(process.env.SPARK_SESSION_SECRET || process.env.SPARK_LOGIN_PASSWORD || '').trim()
