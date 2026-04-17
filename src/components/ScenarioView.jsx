@@ -17,6 +17,7 @@ import { Bar } from 'react-chartjs-2'
 import { useScenario } from './useScenario.js'
 import { buildScenarioCapacityConfig, computeCapacityScenario, getScenarioSummary, ALL_ROLES } from '../engine/scenarioEngine.js'
 import { MONTHS, FTE_COUNT, ATTRITION_FACTOR, HRS_PER_PERSON_MONTH, PRIMARY_ROLES, VIBE_TYPES, LM_BUCKET_MULTIPLIERS, ORBIT_VIBE_MULTIPLIERS } from '../engine/schema.js'
+import { runCalculations } from '../engine/calculate.js'
 import { Card, CardHeader, CardBody, Tag, Pill, AlertBar, KpiStrip, KpiCard } from './ui.jsx'
 import { CHART_COLORS } from '../lib/chartSetup.js'
 import NumericField from './NumericField.jsx'
@@ -35,6 +36,8 @@ const C = {
   red:     'var(--red)',
   sidebar: 'var(--sidebar-bg)',
 }
+
+const PMO_WARN_NAME = 'Aalimah Showkat'
 
 function fmtUpdatedAt(value) {
   try {
@@ -64,7 +67,7 @@ export default function ScenarioView({ uploadedFile, baselineCalc, baselineData 
         {!hasFile && <NoFilePrompt />}
         {hasFile && panel === 'list' && !activeScenario && <StartPrompt onNew={(opts) => sc.newScenario(opts)} />}
         {hasFile && panel === 'list' && activeScenario  && <ComparePanel sc={sc} baselineCalc={baselineCalc} />}
-        {hasFile && panel === 'edit' && editDraft        && <EditPanel sc={sc} baselineIngest={sc.baselineIngest} planningYear={planningYear} />}
+        {hasFile && panel === 'edit' && editDraft        && <EditPanel sc={sc} baselineIngest={sc.baselineIngest} baselineCalc={baselineCalc} planningYear={planningYear} />}
         {hasFile && panel === 'compare' && activeScenario && <ComparePanel sc={sc} baselineCalc={baselineCalc} />}
       </div>
     </div>
@@ -174,7 +177,7 @@ const EDIT_TABS = [
   { id: 'assumptions', label: 'Assumptions' },
 ]
 
-function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
+function EditPanel({ sc, baselineIngest, baselineCalc, planningYear = 2026 }) {
   const [tab, setTab] = useState('projects')
   const { editDraft, saveEditDraft, discardEditDraft,
           patchDraftProject, removeDraftProject,
@@ -286,6 +289,8 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
           onRemove={removeDraftProject}
           onAddProject={addScenarioProject}
           onRemoveAddedProject={removeScenarioProject}
+          baselineIngest={baselineIngest}
+          baselineCalc={baselineCalc}
           planningYear={planningYear}
           roster={baselineIngest?.roster || []}
         />
@@ -349,6 +354,8 @@ function ProjectOverridesTab({
   onRemove,
   onAddProject,
   onRemoveAddedProject,
+  baselineIngest,
+  baselineCalc,
   planningYear = 2026,
   roster = [],
 }) {
@@ -445,6 +452,8 @@ function ProjectOverridesTab({
         <AddScenarioProjectModal
           planningYear={planningYear}
           rosterByRole={rosterByRole}
+          baselineIngest={baselineIngest}
+          baselineCalc={baselineCalc}
           onClose={() => setShowAddModal(false)}
           onAdd={(proj) => { onAddProject?.(proj); setShowAddModal(false) }}
         />
@@ -532,7 +541,7 @@ function ProjectOverridesTab({
   )
 }
 
-function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, onClose, onAdd }) {
+function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, baselineIngest, baselineCalc, onClose, onAdd }) {
   const [name, setName] = useState('')
   const [vibeType, setVibeType] = useState(VIBE_TYPES?.[0] || 'Bond')
   const [startMonth, setStartMonth] = useState(0)
@@ -544,6 +553,12 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, onClo
   const [assignedPM, setAssignedPM] = useState('')
   const [assignedAnalyst1, setAssignedAnalyst1] = useState('')
   const [assignedAnalyst2, setAssignedAnalyst2] = useState('')
+  const [pmoAck, setPmoAck] = useState({ CSM: false, PM: false, A1: false, A2: false })
+  const [pmoWarn, setPmoWarn] = useState({ CSM: false, PM: false, A1: false, A2: false })
+  const [recNote, setRecNote] = useState('')
+  const [recBusy, setRecBusy] = useState(false)
+  const [recDetails, setRecDetails] = useState(null) // { CSM:[{name,overflow,util}], PM:..., A1:..., A2:... }
+  const [lastPick, setLastPick] = useState({ CSM: '', PM: '', A1: '', A2: '' })
 
   const deriveLm = useCallback((lm) => {
     const x = Number(lm)
@@ -556,6 +571,175 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, onClo
   }, [])
 
   const canSave = String(name || '').trim().length > 0
+
+  const normName = useCallback((s) => String(s || '').trim(), [])
+  const maybeWarnPmo = useCallback((key, nameValue) => {
+    const n = normName(nameValue)
+    if (n !== PMO_WARN_NAME) return
+    setPmoWarn(prev => (prev?.[key] ? prev : { ...prev, [key]: true }))
+  }, [normName])
+
+  const suggestStaffing = useCallback(async () => {
+    setRecBusy(true)
+    setRecNote('')
+    setRecDetails(null)
+    try {
+      const ingest = baselineIngest
+      const baseCalc = baselineCalc
+      if (!ingest || !baseCalc) {
+        setRecNote('Recommendations unavailable (baseline not loaded yet).')
+        return
+      }
+
+      const sIdx = Math.max(0, Math.min(11, Number(startMonth)))
+      const dIdx = Math.max(sIdx, Math.min(11, Number(deliveryMonth)))
+      const startDate = new Date(planningYear, sIdx, 1)
+      const deliveryDate = new Date(planningYear, dIdx, 1)
+      const deliveryDateExact = new Date(Date.UTC(planningYear, dIdx, 15))
+
+      const lm = Number(totalLMs)
+      const pct = Number(analystUtilPct)
+
+      // Compute incremental hours for this project only using the engine.
+      const tmpProj = {
+        id: 'tmp_reco',
+        name: String(name || '').trim() || 'New scenario project',
+        vibeType,
+        orbit: String(orbit || 'A').trim().toUpperCase(),
+        totalLMs: Number.isFinite(lm) ? lm : 0,
+        lmMultiplier: deriveLm(lm),
+        analystUtilPct: Number.isFinite(pct) ? pct : 70,
+        startDate,
+        deliveryDate,
+        analyticsStartDate: startDate,
+        startMonthIndex: sIdx,
+        deliveryMonthIndex: dIdx,
+        deliveryDateExact,
+        status: 'In Progress',
+        // Ensure analyst split behaves like “both staffed”
+        assignedCSM: 'temp',
+        assignedPM: 'temp',
+        assignedAnalyst1: 'temp',
+        assignedAnalyst2: 'temp',
+      }
+
+      const calcOne = runCalculations(
+        [tmpProj],
+        ingest.demandMatrix,
+        ingest.orbitMultipliers || {},
+        planningYear,
+        { roster: ingest.roster || [] }
+      )
+
+      const byRole = { CSM: new Array(12).fill(0), PM: new Array(12).fill(0), 'Analyst 1': new Array(12).fill(0), 'Analyst 2': new Array(12).fill(0) }
+      for (const row of (calcOne?.assignments || [])) {
+        if (!byRole[row.role]) continue
+        const mi = Number.isFinite(+row.monthIndex) ? +row.monthIndex : 0
+        byRole[row.role][mi] += Number(row.finalHours || 0)
+      }
+
+      const baseConfig = buildScenarioCapacityConfig({ roster: ingest.roster || [], planningYear })
+      const baseCap = computeCapacityScenario(baseConfig)
+      const capSeries = (role) => {
+        const key = role === 'Analyst 2' ? 'Analyst 1' : role === 'Analyst 1' ? 'Analyst 1' : role
+        return baseCap?.[key]?.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+      }
+
+      const personMonthlyByRole = (() => {
+        const out = { CSM: new Map(), PM: new Map(), 'Analyst 1': new Map(), 'Analyst 2': new Map() }
+        const rows = baseCalc?.demandByPerson || {}
+        for (const v of Object.values(rows)) {
+          const role = v?.role
+          if (!out[role]) continue
+          const n = String(v?.name || '').trim()
+          if (!n) continue
+          out[role].set(n, Array.isArray(v?.monthly) ? v.monthly : new Array(12).fill(0))
+        }
+        return out
+      })()
+
+      const scoreCandidate = (role, personName) => {
+        const baseArr = personMonthlyByRole[role]?.get(personName) || new Array(12).fill(0)
+        const addArr = byRole[role] || new Array(12).fill(0)
+        const capArr = capSeries(role)
+        let overflow = 0
+        let utilNum = 0
+        let utilDen = 0
+        for (let i = 0; i < 12; i++) {
+          if ((addArr[i] || 0) <= 0) continue
+          const newLoad = (baseArr[i] || 0) + (addArr[i] || 0)
+          const cap = capArr[i] || HRS_PER_PERSON_MONTH
+          overflow += Math.max(0, newLoad - cap)
+          utilNum += newLoad
+          utilDen += cap
+        }
+        const util = utilDen ? (utilNum / utilDen) : 0
+        const totalAdd = addArr.reduce((s, v) => s + (v || 0), 0)
+        return { overflow, util, totalAdd }
+      }
+
+      const rankCandidates = (role, candidates) => {
+        const rows = (candidates || [])
+          .map(n => ({ name: n, ...scoreCandidate(role, n) }))
+          .sort((a, b) =>
+            a.overflow - b.overflow ||
+            a.util - b.util ||
+            a.name.localeCompare(b.name)
+          )
+        return rows
+      }
+
+      const balancedPick = (ranked, roleKey) => {
+        const best = ranked?.[0]
+        if (!best) return ''
+        const bestOverflow = best.overflow || 0
+        const bestUtil = best.util || 0
+        // “Very close” = same overflow (within 0.5h) AND within +5 utilization points.
+        const close = (ranked || []).filter(r =>
+          (r.overflow || 0) <= bestOverflow + 0.5 &&
+          (r.util || 0) <= bestUtil + 0.05
+        )
+        const prev = lastPick?.[roleKey] || ''
+        const pick = (close.find(r => r.name !== prev) || close[0] || best).name
+        return pick || ''
+      }
+
+      const rankedCSM = rankCandidates('CSM', rosterByRole?.CSM || [])
+      const rankedPM  = rankCandidates('PM', rosterByRole?.PM || [])
+      const analysts = rosterByRole?.['Analyst 1'] || []
+      const rankedA1 = rankCandidates('Analyst 1', analysts)
+      const recA1 = balancedPick(rankedA1, 'A1')
+      const rankedA2 = rankCandidates('Analyst 2', analysts.filter(n => n !== recA1))
+
+      const recCsm = balancedPick(rankedCSM, 'CSM')
+      const recPm  = balancedPick(rankedPM, 'PM')
+      const recA2  = balancedPick(rankedA2, 'A2')
+
+      if (recCsm) setAssignedCSM(recCsm)
+      if (recPm) setAssignedPM(recPm)
+      if (recA1) setAssignedAnalyst1(recA1)
+      if (recA2) setAssignedAnalyst2(recA2)
+
+      // If a recommendation selects Aalimah, warn inline (do not block).
+      if (!pmoAck?.CSM) maybeWarnPmo('CSM', recCsm)
+      if (!pmoAck?.PM)  maybeWarnPmo('PM', recPm)
+      if (!pmoAck?.A1)  maybeWarnPmo('A1', recA1)
+      if (!pmoAck?.A2)  maybeWarnPmo('A2', recA2)
+
+      setLastPick({ CSM: recCsm, PM: recPm, A1: recA1, A2: recA2 })
+
+      setRecDetails({
+        CSM: rankedCSM.slice(0, 3),
+        PM: rankedPM.slice(0, 3),
+        A1: rankedA1.slice(0, 3),
+        A2: rankedA2.slice(0, 3),
+      })
+
+      setRecNote('Suggested staffing based on lowest projected overload during the project months.')
+    } finally {
+      setRecBusy(false)
+    }
+  }, [baselineIngest, baselineCalc, startMonth, deliveryMonth, planningYear, name, vibeType, orbit, totalLMs, analystUtilPct, deriveLm, rosterByRole, maybeWarnPmo, pmoAck])
 
   const handleAdd = () => {
     if (!canSave) return
@@ -675,23 +859,117 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, onClo
             </FieldGroup>
           </div>
 
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={suggestStaffing}
+              disabled={recBusy}
+              style={{ ...btnStyle('ghost'), padding: '7px 10px', fontSize: 12.5 }}
+              title="Suggest staffing based on who has the most slack in the project months"
+            >
+              {recBusy ? 'Suggesting…' : 'Suggest staffing'}
+            </button>
+            {recNote && (
+              <div style={{ fontSize: 11.5, color: recNote.includes('unavailable') ? C.red : C.faint }}>
+                {recNote}
+              </div>
+            )}
+          </div>
+          {recDetails && (
+            <div style={{ marginTop: 8, fontSize: 11.5, color: C.faint, lineHeight: 1.55 }}>
+              <div><strong style={{ color: C.muted }}>Top picks</strong> (overflow, util in project months):</div>
+              <div><strong>CSM:</strong> {recDetails.CSM.map(x => `${x.name} (${Math.round(x.overflow)}h, ${(x.util * 100).toFixed(0)}%)`).join(' · ') || '—'}</div>
+              <div><strong>PM:</strong> {recDetails.PM.map(x => `${x.name} (${Math.round(x.overflow)}h, ${(x.util * 100).toFixed(0)}%)`).join(' · ') || '—'}</div>
+              <div><strong>Analyst 1:</strong> {recDetails.A1.map(x => `${x.name} (${Math.round(x.overflow)}h, ${(x.util * 100).toFixed(0)}%)`).join(' · ') || '—'}</div>
+              <div><strong>Analyst 2:</strong> {recDetails.A2.map(x => `${x.name} (${Math.round(x.overflow)}h, ${(x.util * 100).toFixed(0)}%)`).join(' · ') || '—'}</div>
+            </div>
+          )}
+
           <div style={{ marginTop: 14, fontSize: 12, fontWeight: 700, color: C.muted }}>Assignments (optional)</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
             <FieldGroup label="CSM">
-              <input list="sc_add_csm" value={assignedCSM} onChange={(e) => setAssignedCSM(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <input
+                list="sc_add_csm"
+                value={assignedCSM}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setAssignedCSM(v)
+                  if (!pmoAck?.CSM) maybeWarnPmo('CSM', v)
+                }}
+                placeholder="Pick or type"
+                style={inputStyle()}
+              />
+              {pmoWarn?.CSM && normName(assignedCSM) === PMO_WARN_NAME && (
+                <InlineWarn
+                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
+                  onProceed={() => { setPmoAck(prev => ({ ...prev, CSM: true })); setPmoWarn(prev => ({ ...prev, CSM: false })) }}
+                  onChooseElse={() => { setAssignedCSM(''); setPmoWarn(prev => ({ ...prev, CSM: false })) }}
+                />
+              )}
               <datalist id="sc_add_csm">{(rosterByRole?.CSM || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
             <FieldGroup label="PM">
-              <input list="sc_add_pm" value={assignedPM} onChange={(e) => setAssignedPM(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <input
+                list="sc_add_pm"
+                value={assignedPM}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setAssignedPM(v)
+                  if (!pmoAck?.PM) maybeWarnPmo('PM', v)
+                }}
+                placeholder="Pick or type"
+                style={inputStyle()}
+              />
+              {pmoWarn?.PM && normName(assignedPM) === PMO_WARN_NAME && (
+                <InlineWarn
+                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
+                  onProceed={() => { setPmoAck(prev => ({ ...prev, PM: true })); setPmoWarn(prev => ({ ...prev, PM: false })) }}
+                  onChooseElse={() => { setAssignedPM(''); setPmoWarn(prev => ({ ...prev, PM: false })) }}
+                />
+              )}
               <datalist id="sc_add_pm">{(rosterByRole?.PM || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
             <FieldGroup label="Analyst 1">
-              <input list="sc_add_a1" value={assignedAnalyst1} onChange={(e) => setAssignedAnalyst1(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <input
+                list="sc_add_a1"
+                value={assignedAnalyst1}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setAssignedAnalyst1(v)
+                  if (!pmoAck?.A1) maybeWarnPmo('A1', v)
+                }}
+                placeholder="Pick or type"
+                style={inputStyle()}
+              />
+              {pmoWarn?.A1 && normName(assignedAnalyst1) === PMO_WARN_NAME && (
+                <InlineWarn
+                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
+                  onProceed={() => { setPmoAck(prev => ({ ...prev, A1: true })); setPmoWarn(prev => ({ ...prev, A1: false })) }}
+                  onChooseElse={() => { setAssignedAnalyst1(''); setPmoWarn(prev => ({ ...prev, A1: false })) }}
+                />
+              )}
               <datalist id="sc_add_a1">{(rosterByRole?.['Analyst 1'] || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
             <FieldGroup label="Analyst 2">
-              <input list="sc_add_a2" value={assignedAnalyst2} onChange={(e) => setAssignedAnalyst2(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
-              <datalist id="sc_add_a2">{(rosterByRole?.['Analyst 2'] || []).map(n => <option key={n} value={n} />)}</datalist>
+              <input
+                list="sc_add_a2"
+                value={assignedAnalyst2}
+                onChange={(e) => {
+                  const v = e.target.value
+                  setAssignedAnalyst2(v)
+                  if (!pmoAck?.A2) maybeWarnPmo('A2', v)
+                }}
+                placeholder="Pick or type"
+                style={inputStyle()}
+              />
+              {pmoWarn?.A2 && normName(assignedAnalyst2) === PMO_WARN_NAME && (
+                <InlineWarn
+                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
+                  onProceed={() => { setPmoAck(prev => ({ ...prev, A2: true })); setPmoWarn(prev => ({ ...prev, A2: false })) }}
+                  onChooseElse={() => { setAssignedAnalyst2(''); setPmoWarn(prev => ({ ...prev, A2: false })) }}
+                />
+              )}
+              <datalist id="sc_add_a2">{(rosterByRole?.['Analyst 2'] || rosterByRole?.['Analyst 1'] || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
           </div>
 
@@ -1983,7 +2261,7 @@ function ComparePanel({ sc, baselineCalc }) {
           <Tag>FTE & effective hours</Tag>
         </CardHeader>
         <CardBody style={{ padding: 0 }}>
-          <CapacityCompareTable baselineCap={baselineCap} scenarioCap={scenarioCap} />
+          <CapacityCompareTable baselineCap={baselineCap} scenarioCap={scenarioCap} baselineCalc={baselineCalc} scenarioCalc={scenarioCalc} />
         </CardBody>
       </Card>
     </div>
@@ -2453,13 +2731,26 @@ function MonthlyDeltaTable({ baseline, scenario, baselineCap, scenarioCap, diff,
 // CAPACITY COMPARE TABLE
 // ─────────────────────────────────────────────────────────────────────────
 
-function CapacityCompareTable({ baselineCap, scenarioCap }) {
+function CapacityCompareTable({ baselineCap, scenarioCap, baselineCalc, scenarioCalc }) {
   const roles = ['CSM', 'PM', 'Analyst']
+  const sum = (arr) => (arr || []).reduce((a, b) => a + (b || 0), 0)
+  const annualDemand = (calc, role) => {
+    if (!calc) return 0
+    if (role !== 'Analyst') return sum(calc?.demandByRole?.[role] || [])
+    const a1 = calc?.analystModel?.demandBase || calc?.demandByRole?.['Analyst 1'] || new Array(12).fill(0)
+    const a2 = calc?.analystModel?.demandIncremental || calc?.demandByRole?.['Analyst 2'] || new Array(12).fill(0)
+    return sum(a1) + sum(a2)
+  }
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
       <thead>
         <tr style={{ background: 'var(--surface-1)' }}>
-          {['Role', 'Baseline FTE', 'Scenario FTE', 'Δ FTE', 'Baseline Eff. Cap/mo', 'Scenario Eff. Cap/mo', 'Δ Cap/mo'].map(h => (
+          {[
+            'Role',
+            'Baseline FTE', 'Scenario FTE', 'Δ FTE',
+            'Baseline Eff. Cap/mo', 'Scenario Eff. Cap/mo', 'Δ Cap/mo',
+            'Baseline Demand/yr', 'Scenario Demand/yr', 'Δ Demand/yr',
+          ].map(h => (
             <th key={h} style={thSt}>{h}</th>
           ))}
         </tr>
@@ -2471,6 +2762,9 @@ function CapacityCompareTable({ baselineCap, scenarioCap }) {
           const sCap = scenarioCap?.[capKey] || {}
           const fteDelta = (sCap.fte || 0) - (bCap.fte || 0)
           const capDelta = Math.round((sCap.effectiveMonthly || 0) - (bCap.effectiveMonthly || 0))
+          const bDem = Math.round(annualDemand(baselineCalc, role) || 0)
+          const sDem = Math.round(annualDemand(scenarioCalc, role) || 0)
+          const demDelta = sDem - bDem
           return (
             <tr key={role} style={{ background: i % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
               <td style={{ ...tdSt, fontWeight: 600 }}>{role}</td>
@@ -2483,6 +2777,11 @@ function CapacityCompareTable({ baselineCap, scenarioCap }) {
               <td style={{ ...tdSt, fontFamily: 'var(--font-mono)' }}>{Math.round(sCap.effectiveMonthly || 0).toLocaleString()}</td>
               <td style={{ ...tdSt, fontFamily: 'var(--font-mono)', fontWeight: 700, color: capDelta < 0 ? 'var(--red)' : capDelta > 0 ? 'var(--green)' : C.faint }}>
                 {capDelta === 0 ? '—' : `${capDelta > 0 ? '+' : ''}${capDelta.toLocaleString()}`}
+              </td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)' }}>{bDem.toLocaleString()}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)' }}>{sDem.toLocaleString()}</td>
+              <td style={{ ...tdSt, fontFamily: 'var(--font-mono)', fontWeight: 700, color: demDelta < 0 ? 'var(--green)' : demDelta > 0 ? 'var(--red)' : C.faint }}>
+                {demDelta === 0 ? '—' : `${demDelta > 0 ? '+' : ''}${demDelta.toLocaleString()}`}
               </td>
             </tr>
           )
@@ -2540,6 +2839,30 @@ function FieldGroup({ label, children }) {
         {label}
       </div>
       {children}
+    </div>
+  )
+}
+
+function InlineWarn({ text, onProceed, onChooseElse }) {
+  return (
+    <div style={{
+      marginTop: 6,
+      padding: '6px 10px',
+      background: 'var(--amber-light, #fefce8)',
+      border: '1px solid #fde68a',
+      borderRadius: 6,
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      fontSize: 11.5,
+      color: C.muted,
+    }}>
+      <span style={{ flex: 1 }}>
+        <strong>{PMO_WARN_NAME}</strong> — {text}
+      </span>
+      <button onClick={onProceed} style={btnStyle('primary')}>Proceed</button>
+      <button onClick={onChooseElse} style={btnStyle('danger-sm')}>Choose someone else</button>
     </div>
   )
 }
@@ -2602,14 +2925,17 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
     return `spark_roster_${safeProj}_${safeRole}`
   }, [role, projectId])
 
+  const baselineNorm = useMemo(() => String(baselineName || '').trim(), [baselineName])
+
   const initial = useMemo(() => {
-    if (overrideValue === undefined) return ''
+    if (overrideValue === undefined) return baselineNorm || ''
     if (overrideValue === null) return ''
     return String(overrideValue || '')
-  }, [overrideValue])
+  }, [overrideValue, baselineNorm])
 
   const [draft, setDraft] = useState(initial)
   const [needsConfirm, setNeedsConfirm] = useState(false)
+  const [needsPmoWarn, setNeedsPmoWarn] = useState(false)
   // onMouseDown on a button fires BEFORE onBlur on the input.
   // Without this flag, blur calls commit() first, which may trigger a re-render
   // that repositions the DOM — causing the button click to land on nothing and freeze.
@@ -2618,6 +2944,7 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
   useEffect(() => {
     setDraft(initial)
     setNeedsConfirm(false)
+    setNeedsPmoWarn(false)
   }, [initial])
 
   const norm = (s) => String(s || '').trim()
@@ -2627,19 +2954,32 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
     return Array.isArray(options) ? options.includes(s) : false
   }, [draft, options])
 
-  const commit = useCallback(({ forceNew = false } = {}) => {
+  const commit = useCallback(({ forceNew = false, forcePmo = false } = {}) => {
     const s = norm(draft)
+    // Treat “same as baseline” as no override.
+    if (s === baselineNorm && overrideValue === undefined) { setNeedsConfirm(false); return }
+    if (s === baselineNorm && overrideValue !== undefined) { onChange?.(undefined); setNeedsConfirm(false); return }
     if (!s) { onChange?.(null); setNeedsConfirm(false); return }
+    if (!forcePmo && s === 'Aalimah Showkat') { setNeedsPmoWarn(true); return }
     if (isKnown || forceNew) { onChange?.(s); setNeedsConfirm(false); return }
     setNeedsConfirm(true)
-  }, [draft, isKnown, onChange])
+  }, [draft, isKnown, onChange, baselineNorm, overrideValue])
 
   return (
     <div>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
         <input
           value={draft}
-          onChange={(e) => { setDraft(e.target.value); setNeedsConfirm(false) }}
+          onChange={(e) => {
+            const v = e.target.value
+            setDraft(v)
+            setNeedsConfirm(false)
+            if (String(v || '').trim() === PMO_WARN_NAME) setNeedsPmoWarn(true)
+          }}
+          onFocus={(e) => {
+            // Make it easy to overwrite the auto-filled baseline value.
+            try { e.target.select() } catch {}
+          }}
           onBlur={() => {
             if (suppressBlurRef.current) { suppressBlurRef.current = false; return }
             commit()
@@ -2654,7 +2994,7 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
         />
         <button
           onMouseDown={() => { suppressBlurRef.current = true }}
-          onClick={() => { onChange?.(undefined); setDraft(''); setNeedsConfirm(false) }}
+          onClick={() => { onChange?.(undefined); setDraft(baselineNorm || ''); setNeedsConfirm(false) }}
           style={{ ...btnStyle('ghost'), fontSize: 11, padding: '4px 8px' }}
           title="Revert to baseline value (no override)"
         >
@@ -2684,7 +3024,7 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
           flexWrap: 'wrap', fontSize: 11.5, color: C.muted,
         }}>
           <span style={{ flex: 1 }}>
-            \u201c{norm(draft)}\u201d isn\u2019t in the roster for {role}. Add as new?
+            “{norm(draft)}” isn’t in the roster for {role}. Add as new?
           </span>
           <button
             onMouseDown={() => { suppressBlurRef.current = true }}
@@ -2699,6 +3039,33 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
             style={btnStyle('danger-sm')}
           >
             Cancel
+          </button>
+        </div>
+      )}
+
+      {needsPmoWarn && (
+        <div style={{
+          marginTop: 6, padding: '6px 10px',
+          background: 'var(--amber-light, #fefce8)', border: '1px solid #fde68a',
+          borderRadius: 6, display: 'flex', gap: 8, alignItems: 'center',
+          flexWrap: 'wrap', fontSize: 11.5, color: C.muted,
+        }}>
+          <span style={{ flex: 1 }}>
+            <strong>Aalimah Showkat</strong> supports PMO as well. Bandwidth may be split across departments. Continue?
+          </span>
+          <button
+            onMouseDown={() => { suppressBlurRef.current = true }}
+            onClick={() => { setNeedsPmoWarn(false); commit({ forcePmo: true }) }}
+            style={btnStyle('primary')}
+          >
+            Proceed
+          </button>
+          <button
+            onMouseDown={() => { suppressBlurRef.current = true }}
+            onClick={() => { setNeedsPmoWarn(false); setDraft('') }}
+            style={btnStyle('danger-sm')}
+          >
+            Choose someone else
           </button>
         </div>
       )}
