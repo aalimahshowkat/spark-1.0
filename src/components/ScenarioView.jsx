@@ -141,6 +141,7 @@ function ScenarioList({ sc, hasFile }) {
                 <div style={{ display: 'flex', gap: 5, marginTop: 6, flexWrap: 'wrap' }}>
                   {summary.modified > 0 && <SmallBadge color={C.accent}>{summary.modified} project{summary.modified !== 1 ? 's' : ''}</SmallBadge>}
                   {summary.excluded > 0 && <SmallBadge color={C.red}>{summary.excluded} excluded</SmallBadge>}
+                  {summary.added > 0 && <SmallBadge color={'#7c3aed'}>{summary.added} added</SmallBadge>}
                   {summary.fteChanges > 0 && <SmallBadge color={C.green}>{summary.fteChanges} FTE</SmallBadge>}
                   {summary.attritionChanges > 0 && <SmallBadge color={'#7c3aed'}>{summary.attritionChanges} attrition</SmallBadge>}
                   {summary.assumptionChanges > 0 && <SmallBadge color={C.amber}>{summary.assumptionChanges} assumption{summary.assumptionChanges !== 1 ? 's' : ''}</SmallBadge>}
@@ -177,10 +178,31 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
   const [tab, setTab] = useState('projects')
   const { editDraft, saveEditDraft, discardEditDraft,
           patchDraftProject, removeDraftProject,
-          patchDraftResource, patchDraftAssumptions, patchDraftAttrition, editSummary } = sc
+          patchDraftResource, patchDraftAssumptions, patchDraftAttrition, editSummary,
+          setEditDraft } = sc
 
   const projects = baselineIngest?.projects || []
   const nameIsValid = !!(editDraft?.name && String(editDraft.name).trim().length > 0)
+
+  const addScenarioProject = useCallback((project) => {
+    if (!project) return
+    setEditDraft(prev => {
+      if (!prev) return prev
+      const existing = Array.isArray(prev.addedProjects) ? prev.addedProjects : []
+      return { ...prev, addedProjects: [...existing, project] }
+    })
+  }, [setEditDraft])
+
+  const removeScenarioProject = useCallback((projectId) => {
+    if (!projectId) return
+    setEditDraft(prev => {
+      if (!prev) return prev
+      const existing = Array.isArray(prev.addedProjects) ? prev.addedProjects : []
+      const nextAdded = existing.filter(p => p?.id !== projectId)
+      const { [projectId]: _, ...rest } = (prev.projectOverrides || {})
+      return { ...prev, addedProjects: nextAdded, projectOverrides: rest }
+    })
+  }, [setEditDraft])
 
   return (
     <div>
@@ -231,6 +253,7 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
           <div style={{ fontSize: 11, color: C.muted, alignSelf: 'center' }}>Active overrides:</div>
           {editSummary.modified > 0    && <Pill type="blue">{editSummary.modified} project{editSummary.modified !== 1 ? 's' : ''} modified</Pill>}
           {editSummary.excluded > 0    && <Pill type="red">{editSummary.excluded} excluded</Pill>}
+          {editSummary.added > 0       && <Pill type="purple">{editSummary.added} project{editSummary.added !== 1 ? 's' : ''} added</Pill>}
           {editSummary.fteChanges > 0  && <Pill type="green">{editSummary.fteChanges} FTE override{editSummary.fteChanges !== 1 ? 's' : ''}</Pill>}
           {editSummary.attritionChanges > 0 && <Pill type="purple">{editSummary.attritionChanges} attrition</Pill>}
           {editSummary.assumptionChanges > 0 && <Pill type="amber">{editSummary.assumptionChanges} assumption{editSummary.assumptionChanges !== 1 ? 's' : ''}</Pill>}
@@ -257,9 +280,13 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
       {tab === 'projects'    && (
         <ProjectOverridesTab
           projects={projects}
+          addedProjects={editDraft.addedProjects || []}
           overrides={editDraft.projectOverrides}
           onPatch={patchDraftProject}
           onRemove={removeDraftProject}
+          onAddProject={addScenarioProject}
+          onRemoveAddedProject={removeScenarioProject}
+          planningYear={planningYear}
           roster={baselineIngest?.roster || []}
         />
       )}
@@ -314,12 +341,31 @@ function EditPanel({ sc, baselineIngest, planningYear = 2026 }) {
 // PROJECT OVERRIDES TAB
 // ─────────────────────────────────────────────────────────────────────────
 
-function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = [] }) {
+function ProjectOverridesTab({
+  projects,
+  addedProjects = [],
+  overrides,
+  onPatch,
+  onRemove,
+  onAddProject,
+  onRemoveAddedProject,
+  planningYear = 2026,
+  roster = [],
+}) {
   const [search, setSearch] = useState('')
   const [showOverridesOnly, setShowOverridesOnly] = useState(false)
   const scrollRef = useRef(null)
   const [openById, setOpenById] = useState({})
   const prevShowOverridesOnlyRef = useRef(false)
+  const [showAddModal, setShowAddModal] = useState(false)
+
+  const addedSafe = Array.isArray(addedProjects) ? addedProjects : []
+  const addedIdSet = useMemo(() => new Set(addedSafe.map(p => p?.id).filter(Boolean)), [addedSafe])
+
+  const allProjects = useMemo(() => {
+    const added = addedSafe.map(p => ({ ...p, __scenarioOnly: true }))
+    return [...added, ...(Array.isArray(projects) ? projects : [])]
+  }, [projects, addedSafe])
 
   const rosterByRole = useMemo(() => {
     const norm = (s) => String(s || '').trim()
@@ -335,10 +381,9 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
       if (!role || !name) continue
       add(map, role === 'Analyst' ? 'Analyst 1' : role, name)
     }
-    for (const pr of Array.isArray(projects) ? projects : []) {
+    for (const pr of Array.isArray(allProjects) ? allProjects : []) {
       add(map, 'CSM', pr?.assignedCSM)
       add(map, 'PM', pr?.assignedPM)
-      add(map, 'SE', pr?.assignedSE)
       add(map, 'Analyst 1', pr?.assignedAnalyst1)
       add(map, 'Analyst 2', pr?.assignedAnalyst2)
     }
@@ -351,15 +396,15 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
       out[role] = [...set].sort((a, b) => a.localeCompare(b))
     }
     return out
-  }, [roster, projects])
+  }, [roster, allProjects])
 
   const filtered = useMemo(() => {
-    return projects.filter(p => {
+    return allProjects.filter(p => {
       if (search && !p.name.toLowerCase().includes(search.toLowerCase())) return false
-      if (showOverridesOnly && !overrides[p.id]) return false
+      if (showOverridesOnly && !overrides[p.id] && !p.__scenarioOnly) return false
       return true
     })
-  }, [projects, search, showOverridesOnly, overrides])
+  }, [allProjects, search, showOverridesOnly, overrides])
 
   const overrideCount = Object.keys(overrides).length
   const overriddenIds = useMemo(() => Object.keys(overrides || {}), [overrides])
@@ -396,6 +441,14 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
 
   return (
     <div>
+      {showAddModal && (
+        <AddScenarioProjectModal
+          planningYear={planningYear}
+          rosterByRole={rosterByRole}
+          onClose={() => setShowAddModal(false)}
+          onAdd={(proj) => { onAddProject?.(proj); setShowAddModal(false) }}
+        />
+      )}
       <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14, lineHeight: 1.6 }}>
         Override individual project parameters — dates, LMs, VIBE type, or exclude projects entirely.
         Changes are additive: only what you set is modified.
@@ -408,6 +461,13 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
           placeholder="Search projects\u2026"
           style={inputStyle({ width: 220 })}
         />
+        <button
+          onClick={() => setShowAddModal(true)}
+          style={{ ...btnStyle('ghost'), padding: '6px 10px', fontSize: 12 }}
+          title="Add a scenario-only project (does not affect baseline plan)"
+        >
+          + Add project
+        </button>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
           <input type="checkbox" checked={showOverridesOnly} onChange={e => setShowOverridesOnly(e.target.checked)} />
           Show modified only
@@ -425,6 +485,11 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
         {overrideCount > 0 && (
           <div style={{ marginLeft: 'auto', fontSize: 11, color: C.accent, fontWeight: 600 }}>
             {overrideCount} project{overrideCount !== 1 ? 's' : ''} overridden
+          </div>
+        )}
+        {overrideCount === 0 && addedSafe.length > 0 && (
+          <div style={{ marginLeft: 'auto', fontSize: 11, color: '#7c3aed', fontWeight: 700 }}>
+            {addedSafe.length} scenario project{addedSafe.length !== 1 ? 's' : ''} added
           </div>
         )}
       </div>
@@ -453,6 +518,8 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
             onPatch={handlePatch}
             onClear={handleClear}
             rosterByRole={rosterByRole}
+            isScenarioOnly={!!p.__scenarioOnly}
+            onRemoveScenarioProject={onRemoveAddedProject}
           />
         ))}
         {filtered.length === 0 && (
@@ -465,13 +532,190 @@ function ProjectOverridesTab({ projects, overrides, onPatch, onRemove, roster = 
   )
 }
 
+function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, onClose, onAdd }) {
+  const [name, setName] = useState('')
+  const [vibeType, setVibeType] = useState(VIBE_TYPES?.[0] || 'Bond')
+  const [startMonth, setStartMonth] = useState(0)
+  const [deliveryMonth, setDeliveryMonth] = useState(1)
+  const [orbit, setOrbit] = useState('A')
+  const [totalLMs, setTotalLMs] = useState(0)
+  const [analystUtilPct, setAnalystUtilPct] = useState(70)
+  const [assignedCSM, setAssignedCSM] = useState('')
+  const [assignedPM, setAssignedPM] = useState('')
+  const [assignedAnalyst1, setAssignedAnalyst1] = useState('')
+  const [assignedAnalyst2, setAssignedAnalyst2] = useState('')
+
+  const deriveLm = useCallback((lm) => {
+    const x = Number(lm)
+    if (!Number.isFinite(x) || x <= 0) return 1
+    const tiers = Array.isArray(LM_BUCKET_MULTIPLIERS) && LM_BUCKET_MULTIPLIERS.length > 0 ? LM_BUCKET_MULTIPLIERS : []
+    for (const bucket of tiers) {
+      if (x <= bucket.maxLMs) return bucket.multiplier
+    }
+    return tiers.length ? tiers[tiers.length - 1].multiplier : 1
+  }, [])
+
+  const canSave = String(name || '').trim().length > 0
+
+  const handleAdd = () => {
+    if (!canSave) return
+    const sIdx = Math.max(0, Math.min(11, Number(startMonth)))
+    const dIdx = Math.max(sIdx, Math.min(11, Number(deliveryMonth)))
+    const startDate = new Date(planningYear, sIdx, 1)
+    const deliveryDate = new Date(planningYear, dIdx, 1)
+    const deliveryDateExact = new Date(Date.UTC(planningYear, dIdx, 15))
+    const id = `scproj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+    const lm = Number(totalLMs)
+    const pct = Number(analystUtilPct)
+    const proj = {
+      id,
+      name: String(name).trim(),
+      vibeType,
+      orbit: String(orbit || 'A').trim().toUpperCase(),
+      totalLMs: Number.isFinite(lm) ? lm : 0,
+      lmMultiplier: deriveLm(lm),
+      analystUtilPct: Number.isFinite(pct) ? pct : 70,
+      startDate,
+      deliveryDate,
+      // Analyst timelines rely on analyticsStartDate; default to startDate.
+      analyticsStartDate: startDate,
+      startMonthIndex: sIdx,
+      deliveryMonthIndex: dIdx,
+      deliveryDateExact,
+      status: 'In Progress',
+      assignedCSM: assignedCSM || 'Unassigned',
+      assignedPM: assignedPM || 'Unassigned',
+      assignedAnalyst1: assignedAnalyst1 || 'Unassigned',
+      assignedAnalyst2: assignedAnalyst2 || 'Unassigned',
+      // Mark as scenario-only (UI convenience; engine ignores unknown fields).
+      __scenarioOnly: true,
+    }
+    onAdd?.(proj)
+  }
+
+  const overlay = {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(15,23,42,0.40)',
+    zIndex: 1000,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+  }
+
+  return (
+    <div style={overlay} onMouseDown={onClose}>
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{
+          width: 620,
+          maxWidth: '100%',
+          maxHeight: '85vh',
+          overflow: 'auto',
+          background: 'white',
+          borderRadius: 10,
+          border: `1px solid ${C.border}`,
+          boxShadow: '0 20px 60px rgba(15,23,42,0.30)',
+        }}
+      >
+        <div style={{ padding: '14px 16px', borderBottom: `1px solid ${C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 13 }}>Add scenario project</div>
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>
+              This project exists only inside this scenario — the baseline dataset is unchanged.
+            </div>
+          </div>
+          <button onClick={onClose} style={btnStyle('ghost')}>✕</button>
+        </div>
+
+        <div style={{ padding: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 12 }}>
+            <FieldGroup label="Project name *">
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. New customer rollout" style={inputStyle()} />
+              {!canSave && <div style={{ fontSize: 11, color: C.red, marginTop: 6 }}>Name is required.</div>}
+            </FieldGroup>
+            <FieldGroup label="VIBE type">
+              <select value={vibeType} onChange={(e) => setVibeType(e.target.value)} style={inputStyle()}>
+                {VIBE_TYPES.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </FieldGroup>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 0.8fr', gap: 12, marginTop: 12 }}>
+            <FieldGroup label="Start month">
+              <select value={startMonth} onChange={(e) => setStartMonth(Number(e.target.value))} style={inputStyle()}>
+                {MONTHS.map((m, i) => <option key={m} value={i}>{m} {planningYear}</option>)}
+              </select>
+            </FieldGroup>
+            <FieldGroup label="Delivery month">
+              <select value={deliveryMonth} onChange={(e) => setDeliveryMonth(Number(e.target.value))} style={inputStyle()}>
+                {MONTHS.map((m, i) => <option key={m} value={i}>{m} {planningYear}</option>)}
+              </select>
+            </FieldGroup>
+            <FieldGroup label="Orbit">
+              <select value={orbit} onChange={(e) => setOrbit(e.target.value)} style={inputStyle()}>
+                {['A', 'B', 'C', 'D'].map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </FieldGroup>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+            <FieldGroup label="Total LMs">
+              <NumericField value={totalLMs} onCommit={(v) => setTotalLMs(v ?? 0)} placeholder="0" />
+              <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>
+                LM multiplier auto-derived from bucket table.
+              </div>
+            </FieldGroup>
+            <FieldGroup label="Analyst 1 load (%)">
+              <NumericField value={analystUtilPct} onCommit={(v) => setAnalystUtilPct(v ?? 70)} placeholder="70" />
+              <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>
+                Remaining load applies to Analyst 2.
+              </div>
+            </FieldGroup>
+          </div>
+
+          <div style={{ marginTop: 14, fontSize: 12, fontWeight: 700, color: C.muted }}>Assignments (optional)</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 10 }}>
+            <FieldGroup label="CSM">
+              <input list="sc_add_csm" value={assignedCSM} onChange={(e) => setAssignedCSM(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <datalist id="sc_add_csm">{(rosterByRole?.CSM || []).map(n => <option key={n} value={n} />)}</datalist>
+            </FieldGroup>
+            <FieldGroup label="PM">
+              <input list="sc_add_pm" value={assignedPM} onChange={(e) => setAssignedPM(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <datalist id="sc_add_pm">{(rosterByRole?.PM || []).map(n => <option key={n} value={n} />)}</datalist>
+            </FieldGroup>
+            <FieldGroup label="Analyst 1">
+              <input list="sc_add_a1" value={assignedAnalyst1} onChange={(e) => setAssignedAnalyst1(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <datalist id="sc_add_a1">{(rosterByRole?.['Analyst 1'] || []).map(n => <option key={n} value={n} />)}</datalist>
+            </FieldGroup>
+            <FieldGroup label="Analyst 2">
+              <input list="sc_add_a2" value={assignedAnalyst2} onChange={(e) => setAssignedAnalyst2(e.target.value)} placeholder="Pick or type" style={inputStyle()} />
+              <datalist id="sc_add_a2">{(rosterByRole?.['Analyst 2'] || []).map(n => <option key={n} value={n} />)}</datalist>
+            </FieldGroup>
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+            <button onClick={onClose} style={btnStyle('ghost')}>Cancel</button>
+            <button onClick={handleAdd} disabled={!canSave} style={{ ...btnStyle('primary'), opacity: canSave ? 1 : 0.55 }}>
+              Add project
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // React.memo is essential here.
 // Without it, every patchDraftProject call (each keystroke in any input) rebuilds
 // the entire editDraft object, which re-renders EditPanel, which re-renders ALL rows,
 // which resets local state (draft text, focus) in every RosterAssignmentField.
 // That cascade was the "freeze" — inputs would lose their value mid-typing.
 const ProjectOverrideRow = React.memo(function ProjectOverrideRow({
-  project, override, open, onToggle, onPatch, onClear, rosterByRole
+  project, override, open, onToggle, onPatch, onClear, rosterByRole,
+  isScenarioOnly = false,
+  onRemoveScenarioProject,
 }) {
   const hasOverride = !!override && Object.keys(override).filter(k => override[k] !== undefined && override[k] !== false).length > 0
   const isExcluded = override?.exclude === true
@@ -505,6 +749,28 @@ const ProjectOverrideRow = React.memo(function ProjectOverrideRow({
         <span style={{ fontSize: 10.5, color: C.muted, flexShrink: 0 }}>{project.vibeType}</span>
         {hasOverride && !isExcluded && <SmallBadge color={C.accent}>Modified</SmallBadge>}
         {isExcluded && <SmallBadge color={C.red}>Excluded</SmallBadge>}
+        {isScenarioOnly && <SmallBadge color={'#7c3aed'}>Scenario</SmallBadge>}
+        {isScenarioOnly && (
+          <button
+            title="Remove this scenario-only project"
+            onClick={(e) => { e.stopPropagation(); onRemoveScenarioProject?.(project.id) }}
+            style={{
+              marginLeft: 6,
+              background: 'var(--red-light)',
+              border: '1px solid #fecaca',
+              color: '#991b1b',
+              borderRadius: 6,
+              padding: '2px 8px',
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+              lineHeight: 1.4,
+            }}
+          >
+            Remove
+          </button>
+        )}
         {hasOverride && (
           <button
             title="Clear all overrides"
@@ -1426,6 +1692,7 @@ function ComparePanel({ sc, baselineCalc }) {
           <div style={{ fontSize: 11, color: C.muted, alignSelf: 'center' }}>Overrides active:</div>
           {activeSummary.modified > 0    && <Pill type="blue">{activeSummary.modified} project{activeSummary.modified !== 1 ? 's' : ''}</Pill>}
           {activeSummary.excluded > 0    && <Pill type="red">{activeSummary.excluded} excluded</Pill>}
+          {activeSummary.added > 0       && <Pill type="purple">{activeSummary.added} added</Pill>}
           {activeSummary.fteChanges > 0  && <Pill type="green">{activeSummary.fteChanges} FTE changed</Pill>}
           {activeSummary.attritionChanges > 0 && <Pill type="purple">{activeSummary.attritionChanges} attrition</Pill>}
           {activeSummary.assumptionChanges > 0 && <Pill type="amber">{activeSummary.assumptionChanges} assumption{activeSummary.assumptionChanges !== 1 ? 's' : ''}</Pill>}

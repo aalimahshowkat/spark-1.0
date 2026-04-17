@@ -64,6 +64,7 @@ import {
   ATTRITION_FACTOR,
   HRS_PER_PERSON_MONTH,
   LM_BUCKET_MULTIPLIERS,
+  VIBE_PHASE_HOURS,
 } from './schema.js'
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -98,6 +99,9 @@ export function createScenario({ name = '', description = '' } = {}) {
     updatedAt:   new Date().toISOString(),
     // Override layers — all optional, additive
     projectOverrides:   {},   // { [projectId]: ProjectOverridePatch }
+    // Scenario-only projects added/removed within the scenario builder.
+    // These do NOT affect the baseline dataset.
+    addedProjects:      [],
     resourceOverrides:  {},   // { [role]: { fteOverride } }
     attritionOverrides: {},   // { [role]: attritionFactor }
     assumptionOverrides: {},  // { attritionFactor?, hrsPerPersonMonth? }
@@ -129,6 +133,7 @@ export function applyScenario(baseline, scenario, opts = {}) {
 
   const {
     projectOverrides = {},
+    addedProjects = [],
     resourceOverrides = {},
     assumptionOverrides = {},
     attritionOverrides = {},
@@ -161,6 +166,42 @@ export function applyScenario(baseline, scenario, opts = {}) {
     })
   }
 
+  // ── 1b. Scenario-only added projects ──────────────────────────────────
+  // These projects exist only inside the scenario; they should be appended
+  // to the modified project list after applying any per-project overrides.
+  const added = (Array.isArray(addedProjects) ? addedProjects : [])
+    .filter(p => p && !projectOverrides[p.id]?.exclude)
+    .map(p => applyProjectOverride({ ...p }, projectOverrides[p.id], { lmBucketTable }))
+
+  // PM calculations use ProjectList "phaseHours" for PM. Baseline ingest provides this,
+  // but scenario-added projects may not. Populate from Demand Matrix (or schema fallback).
+  const dmIndex = buildMatrixIndex(baseline.demandMatrix || [])
+  const ensurePmPhaseHours = (proj) => {
+    if (!proj) return proj
+    const existing = proj.phaseHours || {}
+    if (Object.keys(existing).length > 0) return proj
+    const vibe = proj.vibeType
+    const ph = dmIndex[`${vibe}__PM`] || (VIBE_PHASE_HOURS[vibe] || {})['PM'] || null
+    if (!ph) return proj
+    return {
+      ...proj,
+      phaseHours: {
+        'Project Start M0': parseFloat(ph['Project Start M0']) || 0,
+        'Project Start M1': parseFloat(ph['Project Start M1']) || 0,
+        'Project Mid':      parseFloat(ph['Project Mid'])      || 0,
+        'Project End M-1':  parseFloat(ph['Project End M-1'])  || 0,
+        'Project End M0':   parseFloat(ph['Project End M0'])   || 0,
+        'Project End M1':   parseFloat(ph['Project End M1'])   || 0,
+        'Project End M1+':  parseFloat(ph['Project End M1+'])  || 0,
+      }
+    }
+  }
+
+  modifiedProjects = [
+    ...modifiedProjects,
+    ...added.map(ensurePmPhaseHours),
+  ]
+
   // ── 2. Demand matrix — passed through unchanged ────────────────────
   const demandMatrix = baseline.demandMatrix
 
@@ -190,6 +231,16 @@ export function applyScenario(baseline, scenario, opts = {}) {
     assumptionOverrides,
     attritionOverrides,
   }
+}
+
+// Build an O(1) lookup index from the demand matrix (vibe+role → phaseHours object)
+function buildMatrixIndex(demandMatrix) {
+  const index = {}
+  for (const row of Array.isArray(demandMatrix) ? demandMatrix : []) {
+    if (!row?.vibeType || !row?.role || !row?.phaseHours) continue
+    index[`${row.vibeType}__${row.role}`] = row.phaseHours
+  }
+  return index
 }
 
 /**
@@ -440,6 +491,7 @@ export function getScenarioSummary(scenario) {
   const projOverrides = Object.values(scenario.projectOverrides || {})
   const excluded = projOverrides.filter(p => p.exclude).length
   const modified = projOverrides.filter(p => !p.exclude).length
+  const added = Array.isArray(scenario.addedProjects) ? scenario.addedProjects.length : 0
 
   const resOverrides   = Object.values(scenario.resourceOverrides || {})
   const fteChanges     = resOverrides.filter(r => r.fteOverride !== undefined).length
@@ -450,9 +502,9 @@ export function getScenarioSummary(scenario) {
   const assumptions    = scenario.assumptionOverrides || {}
   const assumptionChanges = Object.values(assumptions).filter(v => v !== undefined && v !== null).length
 
-  const totalChanges = excluded + modified + fteChanges + attritionChanges + assumptionChanges
+  const totalChanges = excluded + modified + added + fteChanges + attritionChanges + assumptionChanges
 
-  return { excluded, modified, fteChanges, attritionChanges, assumptionChanges, totalChanges }
+  return { excluded, modified, added, fteChanges, attritionChanges, assumptionChanges, totalChanges }
 }
 
 /**

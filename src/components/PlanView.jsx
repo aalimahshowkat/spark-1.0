@@ -84,13 +84,6 @@ export default function PlanView({
       'assignedAnalyst1',
       'assignedAnalyst2',
       'analystUtilPct',
-      'phaseStartM0',
-      'phaseStartM1',
-      'phaseMid',
-      'phaseEndMinus1',
-      'phaseEndM0',
-      'phaseEndM1',
-      'phaseEndM1Plus',
     ]
 
     const orderedFields = mandatoryOrder.filter(f => Object.prototype.hasOwnProperty.call(PROJECT_LIST_COLUMN_MAP || {}, f))
@@ -119,14 +112,6 @@ export default function PlanView({
       assignedAnalyst1: 'Example Analyst 1',
       assignedAnalyst2: 'Example Analyst 2',
       analystUtilPct: 80,
-      // Phase inputs (optional, but we include plausible values)
-      phaseStartM0: 10,
-      phaseStartM1: 12,
-      phaseMid: 18,
-      phaseEndMinus1: 8,
-      phaseEndM0: 6,
-      phaseEndM1: 4,
-      phaseEndM1Plus: 2,
     }
 
     const sampleRow = orderedFields.map((field) => {
@@ -172,11 +157,21 @@ export default function PlanView({
       ['Project List — mandatory columns (exact header names)'],
       ...plReqHeaders.map(h => [`- ${h}`]),
       [''],
+      ['Project List — optional columns (PM phase overrides)'],
+      ['- Project Start M0'],
+      ['- Project Start M1'],
+      ['- Project Mid'],
+      ['- Project End M-1'],
+      ['- Project End M0'],
+      ['- Project End M1'],
+      ['- Project End M1+'],
+      [''],
       ['Demand Base Matrix — mandatory columns (exact header names)'],
       ...dmReqHeaders.map(h => [`- ${h}`]),
       [''],
       ['Notes'],
       ['- Orbit×VIBE multipliers must be provided in columns Y/Z/AA of Demand Base Matrix.'],
+      ['- Project stage columns are NOT required. If you provide them, they act as PM phase-hour overrides; otherwise PM hours are derived from the Demand Base Matrix.'],
       ['- CS&T Cluster is not required for engine insights/calculation, so it is not included in this template.'],
     ]
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryAoa), 'Summary')

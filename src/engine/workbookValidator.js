@@ -93,14 +93,8 @@ export async function validateSparkWorkbookFile(file) {
     'networkType',
     // Analyst splitting (missing column defaults to 0 → shifts load to Analyst 2).
     'analystUtilPct',
-    // PM phase hours are consumed directly from Project List in the engine.
-    'phaseStartM0',
-    'phaseStartM1',
-    'phaseMid',
-    'phaseEndMinus1',
-    'phaseEndM0',
-    'phaseEndM1',
-    'phaseEndM1Plus',
+    // PM phase hours are derived from Demand Base Matrix by default.
+    // Project List stage columns are optional overrides (not required for a valid workbook).
     // Assignment columns (needed so people workload isn't treated as unstaffed due to missing columns)
     'assignedCSM',
     'assignedPM',

@@ -39,11 +39,43 @@ function safeNum(n) {
   return Number.isFinite(x) ? x : 0
 }
 
+function roleBucket(role) {
+  if (role === 'Analyst 1' || role === 'Analyst 2') return 'Analyst'
+  return role
+}
+
+function formatRoleTotals(t) {
+  if (!t) return ''
+  const parts = []
+  if ((t.CSM || 0) > 0) parts.push(`CSM ${Math.round(t.CSM).toLocaleString()}h`)
+  if ((t.PM || 0) > 0) parts.push(`PM ${Math.round(t.PM).toLocaleString()}h`)
+  if ((t.Analyst || 0) > 0) parts.push(`Analyst ${Math.round(t.Analyst).toLocaleString()}h`)
+  return parts.join(' · ')
+}
+
 export default function WorkloadExplorerView({ engineInput, engineCalc }) {
   const { data: insightsData, loading: insightsLoading, error: insightsError } =
     useEngineInsightsData(engineInput, !!engineInput)
 
   const assignments = engineCalc?.assignments || []
+
+  // Project-level totals across all roles (for “demand for completion”)
+  const projectRoleTotals = useMemo(() => {
+    const out = new Map()
+    for (const row of assignments) {
+      const key = row?.projectId || row?.projectName
+      if (!key) continue
+      const hrs = safeNum(row?.finalHours)
+      if (hrs <= 0) continue
+
+      if (!out.has(key)) out.set(key, { total: 0, CSM: 0, PM: 0, Analyst: 0 })
+      const rec = out.get(key)
+      rec.total += hrs
+      const b = roleBucket(row?.role)
+      if (b in rec) rec[b] += hrs
+    }
+    return out
+  }, [assignments])
 
   const [role, setRole] = useState('CSM')
   const [person, setPerson] = useState('')
@@ -248,7 +280,7 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
     if (peakVal <= 0) return null
 
     const byProject = projectsForPerson
-      .map(p => ({ name: p.name, hours: p.monthly[peakIdx] || 0, hasAnalyst2: p.hasAnalyst2 }))
+      .map(p => ({ key: p.key, name: p.name, hours: p.monthly[peakIdx] || 0, hasAnalyst2: p.hasAnalyst2 }))
       .filter(x => x.hours > 0)
       .sort((a, b) => b.hours - a.hours)
 
@@ -464,6 +496,8 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
                       Explore: '#c47b1a',
                     }
                     const vibeColor = VIBE_COLORS[p.type] || '#888'
+                    const demandForCompletion = projectRoleTotals.get(p.key)
+                    const demandForCompletionText = formatRoleTotals(demandForCompletion)
 
                     return (
                       <div key={p.key} style={{ padding: '8px 0', borderBottom: '1px solid var(--paper-warm)' }}>
@@ -476,6 +510,11 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
                             <div style={{ fontSize: 11.5, color: C.faint }}>
                               {p.type} · Peak: {MONTHS[peak.idx]} {Math.round(peak.val).toLocaleString()}h
                             </div>
+                            {!!demandForCompletionText && (
+                              <div style={{ fontSize: 11.5, color: C.faint }}>
+                                All roles: {demandForCompletionText}
+                              </div>
+                            )}
                           </div>
                           <div style={{ fontSize: 12, fontWeight: 800, color: C.ink, flexShrink: 0 }}>
                             {Math.round(p.total).toLocaleString()}h
@@ -549,16 +588,15 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
       {effectivePerson && (
         <Grid cols="1.2fr 1fr" gap={14}>
           <Card>
-            <CardHeader title="Projects driving workload (timeline)" tag={`${role} · ${effectivePerson}`} />
+            <CardHeader title="Projects driving workload (heatmap)" tag={`${role} · ${effectivePerson}`} />
             <CardBody>
-              <GanttChart
+              <ProjectMonthHeatmap
                 projects={projectsForPerson.map(p => ({
                   key: p.key,
                   name: p.name,
                   type: p.type,
                   status: p.status,
-                  start: p.start,
-                  end: p.end,
+                  monthly: p.monthly,
                   badge: (role === 'Analyst' && p.hasAnalyst2) ? 'A2' : '',
                   badgeHint: (role === 'Analyst' && p.hasAnalyst2) ? 'Has Analyst 2 hours' : '',
                 }))}
@@ -634,6 +672,12 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
                       <div key={p.name} style={{ fontSize: 12.5, color: 'var(--ink-muted)', marginBottom: 4 }}>
                         - <strong style={{ color: 'var(--ink)' }}>{p.name}</strong>: {Math.round(p.hours).toLocaleString()}h
                         {role === 'Analyst' && p.hasAnalyst2 ? <span style={{ marginLeft: 8, color: 'var(--accent)', fontWeight: 800 }}>A2</span> : null}
+                        {(() => {
+                          const t = projectRoleTotals.get(p.key)
+                          const txt = formatRoleTotals(t)
+                          if (!txt) return null
+                          return <span style={{ marginLeft: 10, color: 'var(--ink-faint)' }}>· All roles: {txt}</span>
+                        })()}
                       </div>
                     ))}
                   </div>
@@ -760,6 +804,141 @@ function GanttChart({ projects, maxHeight = 520 }) {
                     opacity: 0.85,
                   }}
                 />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ProjectMonthHeatmap({ projects, maxHeight = 520 }) {
+  const VIBE_COLORS = {
+    Bond: '#2857a4',
+    Validate: '#2a7a52',
+    Integrate: '#c84b31',
+    Explore: '#c47b1a',
+  }
+
+  const rows = Array.isArray(projects) ? projects : []
+  if (rows.length === 0) {
+    return (
+      <div style={{ padding: '16px', textAlign: 'center', color: 'var(--ink-muted)' }}>
+        No projects.
+      </div>
+    )
+  }
+
+  const LABEL_W = 340
+  const MIN_TOTAL_W = 1120
+
+  let maxCell = 0
+  for (const p of rows) {
+    const m = Array.isArray(p?.monthly) ? p.monthly : []
+    for (let i = 0; i < 12; i++) maxCell = Math.max(maxCell, safeNum(m[i]))
+  }
+  const clamp01 = (x) => Math.max(0, Math.min(1, x))
+
+  return (
+    <div style={{ overflow: 'auto', maxHeight }}>
+      <div style={{ minWidth: MIN_TOTAL_W }}>
+        {/* Month headers */}
+        <div style={{
+          display: 'flex',
+          borderBottom: '1px solid var(--rule)',
+          paddingBottom: 6,
+          marginBottom: 4,
+          position: 'sticky',
+          top: 0,
+          background: 'white',
+          zIndex: 2,
+        }}>
+          <div style={{ width: LABEL_W, flexShrink: 0 }}>
+            <div style={{ fontSize: 11.5, color: 'var(--ink-faint)', paddingLeft: 4 }}>
+              Low → High ({maxCell > 0 ? `${Math.round(maxCell).toLocaleString()}h max cell` : 'no hours'})
+            </div>
+          </div>
+          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(12,1fr)', paddingRight: 10 }}>
+            {MONTHS.map(m => (
+              <div key={m} style={{ textAlign: 'center', fontSize: 10, fontWeight: 700, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                {m}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {rows.map((p, i) => {
+          const color = VIBE_COLORS[p?.type] || '#888'
+          const statusDot = p?.status === 'In Progress' ? '●' : p?.status === 'Done' ? '✓' : '○'
+          const monthly = Array.isArray(p?.monthly) ? p.monthly : new Array(12).fill(0)
+
+          return (
+            <div
+              key={p?.key || p?.name || i}
+              style={{ display: 'flex', alignItems: 'stretch', borderBottom: '1px solid var(--paper-warm)', minHeight: 38 }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'var(--paper-warm)' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+            >
+              <div style={{ width: LABEL_W, flexShrink: 0, paddingRight: 12, overflow: 'hidden', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 10, height: 10, borderRadius: 3, background: color, opacity: 0.9, flexShrink: 0 }} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 650, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {p?.name || '(unnamed)'}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--ink-muted)' }}>
+                    {statusDot} {p?.status || '—'}
+                  </div>
+                </div>
+                {p?.badge ? (
+                  <span
+                    title={p?.badgeHint || ''}
+                    style={{
+                      marginLeft: 'auto',
+                      fontSize: 10,
+                      fontWeight: 900,
+                      padding: '2px 6px',
+                      borderRadius: 6,
+                      background: 'var(--accent-light)',
+                      color: 'var(--accent)',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {p.badge}
+                  </span>
+                ) : null}
+              </div>
+
+              <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(12,1fr)', paddingRight: 10, gap: 6, alignItems: 'center' }}>
+                {MONTHS.map((m, mi) => {
+                  const hrs = safeNum(monthly[mi])
+                  const t = maxCell > 0 ? clamp01(hrs / maxCell) : 0
+                  const bg = hrs > 0 ? `rgba(37, 99, 235, ${0.10 + 0.55 * t})` : 'rgba(15,23,42,0.04)'
+                  const border = hrs > 0 ? 'rgba(37,99,235,0.18)' : 'rgba(15,23,42,0.06)'
+                  const txt = hrs > 0 ? `${Math.round(hrs).toLocaleString()}` : ''
+
+                  return (
+                    <div
+                      key={`${p?.key || p?.name || i}_${mi}`}
+                      title={`${p?.name || ''} · ${m}: ${Math.round(hrs).toLocaleString()}h`}
+                      style={{
+                        height: 22,
+                        borderRadius: 6,
+                        background: bg,
+                        border: `1px solid ${border}`,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: 10.5,
+                        fontWeight: 800,
+                        color: hrs > 0 ? 'rgba(15,23,42,0.88)' : 'transparent',
+                        userSelect: 'none',
+                      }}
+                    >
+                      {txt}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )

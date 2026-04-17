@@ -256,6 +256,23 @@ function getProjectPhaseHours(project, phase) {
   return parseFloat(obj[phase]) || 0
 }
 
+// PM hours historically came from Project List stage columns (phaseHours).
+// To support workbooks that omit those columns, we fall back to Demand Matrix
+// hours when the project has no meaningful phaseHours populated.
+function getPmBaseHours(project, phase, matrixIndex, vibeType) {
+  if (!phase || phase === PHASE_NA) return 0
+  const obj = project?.phaseHours || null
+  if (obj && typeof obj === 'object') {
+    const sum = Object.values(obj).reduce((s, v) => s + (parseFloat(v) || 0), 0)
+    if (sum > 0) {
+      // Treat Project List values as overrides when present.
+      return getProjectPhaseHours(project, phase)
+    }
+  }
+  // Default behavior: derive PM hours from the Demand Matrix (or schema fallback).
+  return lookupBaseHours(matrixIndex, vibeType, 'PM', phase)
+}
+
 function getDeliveryDayOfMonth(project) {
   const d = project?.deliveryDateExact
   if (!(d instanceof Date) || isNaN(d.getTime())) return 0
@@ -337,24 +354,24 @@ function computeProjectRoleAssignments(project, role, matrixIndex, orbitMultipli
     if (normRole === 'PM') {
       if (vibeType !== 'Validate' && case1 === 'Project End M-1') {
         driverPhase = case1
-        const base = getProjectPhaseHours(project, case1)
+        const base = getPmBaseHours(project, case1, matrixIndex, vibeType)
         const denom = Math.max(1, case1EndMinus1Count)
         qHours = (base / denom) * usagePct
         debug = {
           ...debug,
           driverPhase,
-          baseHoursSource: 'ProjectList',
+          baseHoursSource: (project?.phaseHours && Object.values(project.phaseHours || {}).reduce((s,v)=>s+(safeNum(v)||0),0) > 0) ? 'ProjectList' : 'DemandMatrix',
           baseHours: safeNum(base),
           distributionDenom: denom,
         }
       } else {
         driverPhase = case2
-        const base = getProjectPhaseHours(project, case2)
+        const base = getPmBaseHours(project, case2, matrixIndex, vibeType)
         qHours = base * usagePct
         debug = {
           ...debug,
           driverPhase,
-          baseHoursSource: 'ProjectList',
+          baseHoursSource: (project?.phaseHours && Object.values(project.phaseHours || {}).reduce((s,v)=>s+(safeNum(v)||0),0) > 0) ? 'ProjectList' : 'DemandMatrix',
           baseHours: safeNum(base),
           distributionDenom: 1,
         }
