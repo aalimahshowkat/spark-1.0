@@ -376,7 +376,13 @@ export default function PlanView({
 
     // Example phase totals (left side) — a few rows
     dmAoa.push(makeRow(['Bond', 'CSM', 10, 12, 18, 8, 6, 4, 2]))
-    dmAoa.push(makeRow(['Bond', 'PM', 8, 8, 12, 6, 4, 2, 1]))
+
+    // PM baseline phase totals (updated defaults)
+    dmAoa.push(makeRow(['Bond', 'PM', 10, 10, 10, 50, 28, 8, 8]))
+    dmAoa.push(makeRow(['Explore', 'PM', 15, 30, 10, 40, 40, 10, 5]))
+    dmAoa.push(makeRow(['Integrate', 'PM', 10, 20, 10, 60, 28, 8, 8]))
+    dmAoa.push(makeRow(['Validate', 'PM', 15, 15, 7, 40, 60, 10, 4]))
+
     dmAoa.push(makeRow(['Bond', 'Analyst 1', 4, 6, 10, 5, 3, 2, 1]))
 
     // Orbit×VIBE multipliers headers in Y/Z/AA (row 5+ visually, after phase examples)
