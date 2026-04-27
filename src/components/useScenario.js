@@ -97,7 +97,10 @@ export function useScenario(engineInput, baselineCalc) {
 
     try {
       const planningYear = baselineCalc?.meta?.planningYear || 2026
-      const modified = applyScenario(baselineIngest, activeScenario, { planningYear })
+      const modified = applyScenario(baselineIngest, activeScenario, {
+        planningYear,
+        baselineCapacityConfig: engineInput?.capacityConfig || null,
+      })
       if (!modified) { setCalcLoading(false); return }
 
       // runCalculations is synchronous

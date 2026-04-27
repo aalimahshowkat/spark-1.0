@@ -6,16 +6,28 @@ export function useEngineCalc(engineInput) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [calc, setCalc] = useState(null)
+  const [ingest, setIngest] = useState(null)
 
   const inputKey = useMemo(() => {
     if (!engineInput) return null
+    const capKey = (() => {
+      try { return JSON.stringify(engineInput?.capacityConfig || null) } catch { return '' }
+    })()
+    const overrideKey = (() => {
+      try {
+        return JSON.stringify({
+          roster: engineInput?.rosterOverride || null,
+          projects: engineInput?.projectsOverride || null,
+        })
+      } catch { return '' }
+    })()
     if (engineInput.kind === 'file' && engineInput.file) {
       const f = engineInput.file
-      return `file__${f.name}__${f.size}__${f.lastModified}`
+      return `file__${f.name}__${f.size}__${f.lastModified}__cap__${capKey}__ovr__${overrideKey}`
     }
     if (engineInput.kind === 'ingest' && engineInput.ingest) {
       const m = engineInput.ingest?.meta || {}
-      return `ingest__${m.fileName || ''}__${m.parsedAt || ''}__${m.durationMs || 0}`
+      return `ingest__${m.fileName || ''}__${m.parsedAt || ''}__${m.durationMs || 0}__cap__${capKey}__ovr__${overrideKey}`
     }
     return null
   }, [engineInput])
@@ -23,6 +35,7 @@ export function useEngineCalc(engineInput) {
   useEffect(() => {
     if (!engineInput) {
       setCalc(null)
+      setIngest(null)
       setError(null)
       setLoading(false)
       return
@@ -32,8 +45,24 @@ export function useEngineCalc(engineInput) {
     setLoading(true)
     setError(null)
 
-    const runFromIngest = (ingest) => {
-      const c = runCalculations(ingest.projects, ingest.demandMatrix, ingest.orbitMultipliers, ingest?.meta?.planningYear, { roster: ingest?.roster || [] })
+    const applyOverrides = (ing) => {
+      const rosterOverride = engineInput?.rosterOverride
+      const projectsOverride = engineInput?.projectsOverride
+      const nextRoster = Array.isArray(rosterOverride) ? rosterOverride : (ing?.roster || [])
+      const nextProjects = Array.isArray(projectsOverride) ? projectsOverride : (ing?.projects || [])
+      return { ...(ing || {}), roster: nextRoster, projects: nextProjects }
+    }
+
+    const runFromIngest = (rawIngest) => {
+      const ing = applyOverrides(rawIngest)
+      setIngest(ing)
+      const c = runCalculations(
+        ing.projects,
+        ing.demandMatrix,
+        ing.orbitMultipliers,
+        ing?.meta?.planningYear,
+        { roster: ing?.roster || [], capacityConfig: engineInput?.capacityConfig || null }
+      )
       setCalc(c)
       setLoading(false)
     }
@@ -73,6 +102,6 @@ export function useEngineCalc(engineInput) {
     return () => { alive = false }
   }, [inputKey])
 
-  return { calc, loading, error }
+  return { calc, ingest, loading, error }
 }
 

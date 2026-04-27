@@ -210,12 +210,12 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
   }
 
   const totalProjects = Object.values(vibeProjectCountsSafe).reduce((a,b)=>a+b,0)
-  const unassignedAnalystBaseTotal = (source === 'engine'
-    ? (viewData?.analystUnassigned?.base || viewData?.unassigned?.Analyst || [])
-    : (viewData?.unassigned?.Analyst || [])
-  ).reduce((a,b)=>a+b,0)
-  const unallocatedAnalyst2DemandTotal = (source === 'engine' ? analystInc : []).reduce((a,b)=>a+(b||0),0)
-  const unallocatedDemandTotal = unassignedAnalystBaseTotal + unallocatedAnalyst2DemandTotal
+  const unassignedTotals = (viewData?.unassigned || {})
+  const unassignedAllRolesTotal = ['CSM', 'PM', 'Analyst']
+    .map(r => (unassignedTotals?.[r] || []))
+    .reduce((sum, arr) => sum + (arr || []).reduce((a, b) => a + (b || 0), 0), 0)
+  const unallocatedAnalyst2DemandTotal = (source === 'engine' ? analystInc : []).reduce((a, b) => a + (b || 0), 0)
+  const unallocatedDemandTotal = unassignedAllRolesTotal + unallocatedAnalyst2DemandTotal
 
   return (
     <div>
@@ -240,6 +240,7 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
         }
         {tripleBreachMonths.length > 0 && <> All 3 roles breach simultaneously in <strong>{tripleBreachMonths.join(', ')}</strong>.</>}
         {worstOver > 0 && <> Review the Demand and Utilization charts below to validate breach months and magnitude.</>}
+        {(unallocatedDemandTotal || 0) > 0 && <> Also check <strong>Unallocated Demand</strong> (unassigned work / Analyst 2 pressure) — breaches often worsen when work isn’t staffed.</>}
       </AlertBar>
 
       <KpiStrip cols={5}>
@@ -257,7 +258,7 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
         <KpiCard
           label="Unallocated Demand"
           value={(unallocatedDemandTotal / 1000).toFixed(1) + 'K'}
-          sub={source === 'engine' ? 'analyst hrs unassigned + Analyst 2 demand' : 'analyst hrs unassigned'}
+          sub={source === 'engine' ? 'unstaffed hrs (all roles) + Analyst 2 demand' : 'unstaffed hrs (all roles)'}
           badge="Allocation gap"
           badgeType="red"
           accent="red"

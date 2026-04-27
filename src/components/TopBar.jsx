@@ -2,6 +2,7 @@ import React, { useRef } from 'react'
 
 const TAB_LABELS = {
   plan:       'Plan',
+  capacitySetup: 'Advanced planning',
   dataEngine: 'Data Engine',
   overview:   'Overview',
   capacity:   'Capacity',
@@ -13,10 +14,12 @@ const TAB_LABELS = {
   exports:    'Exports',
   scenarios:  'Scenarios',
   ai:         'SPARK AI',
+  guide:      'User Guide',
 }
 
 const TAB_SUBTITLES = {
   plan:       'Your active capacity plan · upload, refresh or edit projects',
+  capacitySetup: 'Capacity control center · working model, allocations & demand drivers',
   dataEngine: 'Schema ingestion · parsing · data quality checks',
   overview:   'Year-at-a-glance · demand, capacity & utilization',
   capacity:   'Monthly demand vs capacity by role · team utilisation heatmap',
@@ -28,7 +31,10 @@ const TAB_SUBTITLES = {
   exports:    'Download capacity model, project list and scenario outputs',
   scenarios:  'Model what-if changes · compare against baseline',
   ai:         'AI-powered capacity intelligence · grounded in your plan data',
+
 }
+
+
 
 export default function TopBar({ onUpload, fileName, activeTab, loading, onLogout }) {
   const ref = useRef()

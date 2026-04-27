@@ -5,6 +5,14 @@ function safeText(s) {
   return String(s || '').trim()
 }
 
+function normKey(s) {
+  return String(s ?? '')
+    .replace(/\u00a0/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
 function readWorkbook(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -28,16 +36,46 @@ function readWorkbook(file) {
 
 function headerKeysForSheet(sheet) {
   if (!sheet) return []
-  // Read a small sample so we can infer header keys.
+  // Many real-world workbooks have one or more title/blank rows before the header.
+  // Scan the first ~30 rows (AOA) and pick the row that best matches our expected headers.
+  try {
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' })
+    const expectedRaw = Object.values(PROJECT_LIST_COLUMN_MAP || {}).flat().filter(Boolean)
+    const expected = new Set(expectedRaw.map(normKey).filter(Boolean))
+
+    let bestRow = null
+    let bestScore = 0
+    const limit = Math.min(grid.length, 30)
+    for (let r = 0; r < limit; r++) {
+      const row = Array.isArray(grid[r]) ? grid[r] : []
+      const cells = row.map(v => normKey(v)).filter(Boolean)
+      const uniq = new Set(cells)
+      let score = 0
+      for (const k of uniq) if (expected.has(k)) score++
+      if (score > bestScore) {
+        bestScore = score
+        bestRow = row
+      }
+    }
+
+    // Require at least 3 header hits to avoid false positives on sparse rows.
+    if (bestRow && bestScore >= 3) {
+      return bestRow
+        .map(v => String(v ?? '').trim())
+        .filter(Boolean)
+    }
+  } catch {}
+
+  // Fallback: infer headers from the first data row keys (SheetJS default behaviour).
   // If there are duplicate headers, SheetJS may suffix with `_1` in object keys.
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
   const first = rows?.[0] || {}
-  return Object.keys(first)
+  return Object.keys(first).filter(Boolean)
 }
 
 function hasAnyKey(keysSet, names) {
   for (const n of (names || [])) {
-    if (keysSet.has(n)) return true
+    if (keysSet.has(normKey(n))) return true
   }
   return false
 }
@@ -79,7 +117,8 @@ export async function validateSparkWorkbookFile(file) {
 
   // ── Project List columns ────────────────────────────────────────────────
   const pl = wb.Sheets['Project List']
-  const plKeys = new Set(headerKeysForSheet(pl))
+  const plHeaderRaw = headerKeysForSheet(pl)
+  const plKeys = new Set(plHeaderRaw.map(normKey).filter(Boolean))
   // Required for correct engine math & attribution.
   // Note: although ingest can infer orbit if column is absent, UX requires an explicit Orbit column.
   const requiredProjectFields = [
@@ -137,7 +176,8 @@ export async function validateSparkWorkbookFile(file) {
 
   // ── Demand Base Matrix columns ──────────────────────────────────────────
   const dm = wb.Sheets['Demand Base Matrix']
-  const dmKeys = new Set(headerKeysForSheet(dm))
+  const dmHeaderRaw = headerKeysForSheet(dm)
+  const dmKeys = new Set(dmHeaderRaw.map(normKey).filter(Boolean))
   // Validate the “base” names (e.g. Role) but accept `_1` and `.1`.
   const requiredDemandBases = [
     'VIBE Tag',
@@ -200,8 +240,8 @@ export async function validateSparkWorkbookFile(file) {
   const meta = {
     fileName: safeText(file?.name),
     sheetsFound: foundSheets,
-    projectListColumns: [...plKeys].slice(0, 80),
-    demandMatrixColumns: [...dmKeys].slice(0, 80),
+    projectListColumns: (plHeaderRaw || []).slice(0, 80),
+    demandMatrixColumns: (dmHeaderRaw || []).slice(0, 80),
   }
 
   const ok = !issues.some(i => i.severity === 'error')

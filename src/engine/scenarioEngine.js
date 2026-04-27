@@ -66,6 +66,7 @@ import {
   LM_BUCKET_MULTIPLIERS,
   VIBE_PHASE_HOURS,
 } from './schema.js'
+import { computeRosterWorkingDaysByMonth } from './workingDays.js'
 
 // ─────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -139,6 +140,7 @@ export function applyScenario(baseline, scenario, opts = {}) {
     attritionOverrides = {},
   } = scenario
   const planningYear = opts?.planningYear || 2026
+  const baselineCapacityConfig = opts?.baselineCapacityConfig || null
 
   // Scenario-level assumption tables (optional)
   const lmBucketTable = Array.isArray(assumptionOverrides?.lmBucketMultipliers) && assumptionOverrides.lmBucketMultipliers.length > 0
@@ -202,6 +204,59 @@ export function applyScenario(baseline, scenario, opts = {}) {
     ...added.map(ensurePmPhaseHours),
   ]
 
+  // ── 1c. Scenario-only PM multipliers (task table → aggregated PM phaseHours) ───
+  // If provided, this overrides the PM base-hours override path (project.phaseHours)
+  // for ALL projects in the scenario based on their VIBE tag (customer journey stage).
+  const pmTaskTable = assumptionOverrides?.pmTaskMultipliers || null
+  if (pmTaskTable && typeof pmTaskTable === 'object' && baseline?.demandTasks?.length) {
+    const baseRows = baseline.demandTasks.filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
+    const overrides = pmTaskTable?.overridesByKey || {}
+    const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
+
+    // Build effective rows: baseline task rows with per-cell overrides applied.
+    const effective = baseRows.map(r => {
+      const stage = String(r?.stage || '').trim()
+      const taskStage = String(r?.taskStage || '').trim()
+      const key = normKey(stage, taskStage)
+      const ov = overrides?.[key]
+      if (!ov || typeof ov !== 'object') return r
+      const ph = { ...(r.phaseHours || {}) }
+      for (const k of ['Project Start M0','Project Start M1','Project Mid','Project End M-1','Project End M0','Project End M1','Project End M1+']) {
+        if (ov[k] !== undefined && ov[k] !== null && Number.isFinite(+ov[k])) ph[k] = +ov[k]
+      }
+      return { ...r, phaseHours: ph }
+    })
+
+    // Aggregate into VIBE-level PM phaseHours by customer journey stage.
+    const totalsByStage = new Map()
+    for (const r of effective) {
+      const stage = String(r?.stage || '').trim()
+      if (!stage) continue
+      if (!totalsByStage.has(stage)) {
+        totalsByStage.set(stage, {
+          'Project Start M0': 0,
+          'Project Start M1': 0,
+          'Project Mid': 0,
+          'Project End M-1': 0,
+          'Project End M0': 0,
+          'Project End M1': 0,
+          'Project End M1+': 0,
+        })
+      }
+      const tgt = totalsByStage.get(stage)
+      const ph = r.phaseHours || {}
+      for (const k of Object.keys(tgt)) tgt[k] += (parseFloat(ph[k]) || 0)
+    }
+
+    const stageForProject = (p) => String(p?.vibeType || '').trim()
+    modifiedProjects = modifiedProjects.map(p => {
+      const st = stageForProject(p)
+      const ph = totalsByStage.get(st)
+      if (!ph) return p
+      return { ...p, phaseHours: { ...ph } }
+    })
+  }
+
   // ── 2. Demand matrix — passed through unchanged ────────────────────
   const demandMatrix = baseline.demandMatrix
 
@@ -221,6 +276,7 @@ export function applyScenario(baseline, scenario, opts = {}) {
     resourceOverrides,
     assumptionOverrides,
     attritionOverrides,
+    baselineCapacityConfig,
   })
 
   return {
@@ -307,6 +363,7 @@ export function buildScenarioCapacityConfig({
   resourceOverrides = {},
   assumptionOverrides = {},
   attritionOverrides = {},
+  baselineCapacityConfig = null,
 } = {}) {
   const fteCount = getFteCountFromRoster(roster)
   for (const [role, patch] of Object.entries(resourceOverrides || {})) {
@@ -316,16 +373,18 @@ export function buildScenarioCapacityConfig({
   }
 
   const businessDaysByMonth = getBusinessDaysByMonth(planningYear)
-  const BASELINE_HRS_PER_PERSON_DAY = 10
+  const BASELINE_HRS_PER_PERSON_DAY = baselineCapacityConfig?.hrsPerPersonDay ?? 10
   const globalHrsPerPersonDay =
     (assumptionOverrides?.hrsPerPersonDay !== undefined && assumptionOverrides?.hrsPerPersonDay !== null)
       ? Number(assumptionOverrides.hrsPerPersonDay)
       : BASELINE_HRS_PER_PERSON_DAY
-  const hrsPerPersonDay = (Number.isFinite(globalHrsPerPersonDay) && globalHrsPerPersonDay > 0)
+  const hrsPerPersonDay = (Number.isFinite(globalHrsPerPersonDay) && globalHrsPerPersonDay >= 0)
     ? globalHrsPerPersonDay
     : BASELINE_HRS_PER_PERSON_DAY
 
-  const baselineHrsPerPersonMonthByMonth = businessDaysByMonth.map(d => d * BASELINE_HRS_PER_PERSON_DAY)
+  const baselineHrsPerPersonMonthByMonth =
+    baselineCapacityConfig?.hrsPerPersonMonthByMonth ||
+    businessDaysByMonth.map(d => d * BASELINE_HRS_PER_PERSON_DAY)
 
   // Legacy/global override: constant hours per month across the year.
   // New/global override: hours per business day (calendar-aware by month).
@@ -350,7 +409,7 @@ export function buildScenarioCapacityConfig({
   if (hrsDayByRoleRaw && typeof hrsDayByRoleRaw === 'object') {
     for (const [role, value] of Object.entries(hrsDayByRoleRaw)) {
       const num = Number(value)
-      if (!Number.isFinite(num) || num <= 0) continue
+      if (!Number.isFinite(num) || num < 0) continue
       const key = role === 'Analyst' ? 'Analyst 1' : role
       hrsPerPersonMonthByMonthByRole[key] = businessDaysByMonth.map(d => d * num)
     }
@@ -366,6 +425,19 @@ export function buildScenarioCapacityConfig({
     }
   }
 
+  // Baseline plan per-role hours/day (if provided) fill in defaults when scenario doesn't override.
+  if (Object.keys(hrsPerPersonMonthByMonthByRole).length === 0) {
+    const baseByRole = baselineCapacityConfig?.hrsPerPersonDayByRole
+    if (baseByRole && typeof baseByRole === 'object') {
+      for (const [role, value] of Object.entries(baseByRole)) {
+        const num = Number(value)
+        if (!Number.isFinite(num) || num < 0) continue
+        const key = role === 'Analyst' ? 'Analyst 1' : role
+        hrsPerPersonMonthByMonthByRole[key] = businessDaysByMonth.map(d => d * num)
+      }
+    }
+  }
+
   const attritionGlobal = assumptionOverrides?.attritionFactor ?? ATTRITION_FACTOR
   const attritionByRole = { ...(attritionOverrides || {}) }
   if (attritionByRole.Analyst !== undefined && attritionByRole['Analyst 1'] === undefined) {
@@ -373,8 +445,65 @@ export function buildScenarioCapacityConfig({
     delete attritionByRole.Analyst
   }
 
+  const mergeWorkingDays = (base, delta) => {
+    const b = (base && typeof base === 'object') ? base : {}
+    const d = (delta && typeof delta === 'object') ? delta : {}
+    const out = {
+      orgHolidays: Array.isArray(b.orgHolidays) ? [...b.orgHolidays] : [],
+      roleCalendarsByRole: (b.roleCalendarsByRole && typeof b.roleCalendarsByRole === 'object') ? { ...b.roleCalendarsByRole } : {},
+      personAdjustmentsByPerson: (b.personAdjustmentsByPerson && typeof b.personAdjustmentsByPerson === 'object') ? { ...b.personAdjustmentsByPerson } : {},
+    }
+    if (Array.isArray(d.orgHolidays) && d.orgHolidays.length) out.orgHolidays.push(...d.orgHolidays)
+    if (d.roleCalendarsByRole && typeof d.roleCalendarsByRole === 'object') {
+      for (const [k, v] of Object.entries(d.roleCalendarsByRole)) {
+        const prev = out.roleCalendarsByRole[k] || {}
+        const holPrev = Array.isArray(prev.holidays) ? prev.holidays : []
+        const holNext = Array.isArray(v?.holidays) ? v.holidays : []
+        out.roleCalendarsByRole[k] = { ...prev, ...v, holidays: [...holPrev, ...holNext] }
+      }
+    }
+    if (d.personAdjustmentsByPerson && typeof d.personAdjustmentsByPerson === 'object') {
+      for (const [name, arr] of Object.entries(d.personAdjustmentsByPerson)) {
+        const prev = Array.isArray(out.personAdjustmentsByPerson[name]) ? out.personAdjustmentsByPerson[name] : []
+        const next = Array.isArray(arr) ? arr : []
+        out.personAdjustmentsByPerson[name] = [...prev, ...next]
+      }
+    }
+    const has =
+      out.orgHolidays.length ||
+      Object.keys(out.roleCalendarsByRole).length ||
+      Object.keys(out.personAdjustmentsByPerson).length
+    return has ? out : null
+  }
+
+  const mergeAssignmentBackfills = (base, delta) => {
+    const b = (base && typeof base === 'object') ? base : {}
+    const d = (delta && typeof delta === 'object') ? delta : {}
+    const out = {}
+
+    const addFrom = (src) => {
+      for (const [projectId, byRole] of Object.entries(src || {})) {
+        if (!byRole || typeof byRole !== 'object') continue
+        if (!out[projectId]) out[projectId] = {}
+        for (const [role, arr] of Object.entries(byRole || {})) {
+          const prev = Array.isArray(out[projectId][role]) ? out[projectId][role] : []
+          const next = Array.isArray(arr) ? arr.filter(Boolean) : []
+          if (next.length) out[projectId][role] = [...prev, ...next]
+        }
+        // clean empty
+        if (Object.keys(out[projectId]).length === 0) delete out[projectId]
+      }
+    }
+
+    addFrom(b)
+    addFrom(d)
+
+    return Object.keys(out).length ? out : null
+  }
+
   return {
     planningYear,
+    roster,
     fteCount,
     attritionGlobal,
     attritionByRole,
@@ -382,6 +511,9 @@ export function buildScenarioCapacityConfig({
     businessDaysByMonth,
     hrsPerPersonMonthByMonth,
     hrsPerPersonMonthByMonthByRole: Object.keys(hrsPerPersonMonthByMonthByRole).length ? hrsPerPersonMonthByMonthByRole : null,
+    allocationsByPerson: baselineCapacityConfig?.allocationsByPerson || null,
+    workingDays: mergeWorkingDays(baselineCapacityConfig?.workingDays || null, assumptionOverrides?.workingDaysDelta || null),
+    assignmentBackfills: mergeAssignmentBackfills(baselineCapacityConfig?.assignmentBackfills || null, assumptionOverrides?.assignmentBackfillsDelta || null),
   }
 }
 
@@ -391,28 +523,163 @@ export function buildScenarioCapacityConfig({
  */
 export function computeCapacityScenario(scenarioCapacityConfig) {
   const {
-    fteCount,
+    fteCount: targetFteCount,
     attritionGlobal,
     attritionByRole,
     hrsPerPersonDay,
     businessDaysByMonth,
     hrsPerPersonMonthByMonth,
     hrsPerPersonMonthByMonthByRole,
+    roster,
+    allocationsByPerson,
+    workingDays,
   } = scenarioCapacityConfig
   const result = {}
 
-  for (const role of Object.keys(fteCount)) {
+  // Calendar-aware per-person working days.
+  const rosterDays = computeRosterWorkingDaysByMonth({
+    year: scenarioCapacityConfig?.planningYear || 2026,
+    baseBusinessDaysByMonth: businessDaysByMonth,
+    roster,
+    workingDays: workingDays || null,
+  })
+
+  const baseRosterTotals = getFteCountFromRoster(roster)
+  const factorByRole = {}
+  for (const [role, v] of Object.entries(targetFteCount || {})) {
+    const base = Number(baseRosterTotals?.[role] || 0)
+    const target = Number(v || 0)
+    factorByRole[role] = base > 0 ? (target / base) : 1
+  }
+
+  // Effective FTE can be derived from per-person allocations.
+  let effectiveFteCount = { ...(targetFteCount || {}) }
+  const DEFAULT_HALF_TIME_NAME = 'Aalimah Showkat'
+  const isDefaultHalfTime = (name) => String(name || '').trim().toLowerCase() === DEFAULT_HALF_TIME_NAME.toLowerCase()
+  const hasDefaultHalfTime = Array.isArray(roster) && roster.some(p => isDefaultHalfTime(p?.name))
+  const hasAlloc = !!(allocationsByPerson && typeof allocationsByPerson === 'object' && Object.keys(allocationsByPerson).length > 0)
+
+  if (Array.isArray(roster) && roster.length > 0 && (hasAlloc || hasDefaultHalfTime)) {
+    const rosterTotals = baseRosterTotals
+    const personMap = new Map() // name -> { fte, baseRole }
+    for (const p of roster) {
+      const name = String(p?.name || '').trim()
+      if (!name) continue
+      const role = String(p?.role || '').trim()
+      const fte = Number(p?.fte)
+      if (!Number.isFinite(fte) || fte <= 0) continue
+      const baseRole = role === 'Analyst' ? 'Analyst 1' : role
+      const prev = personMap.get(name)
+      if (!prev) personMap.set(name, { fte, baseRole })
+      else personMap.set(name, { fte: Math.max(prev.fte || 0, fte), baseRole: prev.baseRole || baseRole })
+    }
+
+    const derived = { CSM: 0, PM: 0, 'Analyst 1': 0 }
+    const pctFor = (name, role, baseRole) => {
+      const rec = allocationsByPerson?.[name]
+      if (rec && typeof rec === 'object') {
+        const v = rec?.roles?.[role]
+        const n = Number(v)
+        return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+      }
+      if (isDefaultHalfTime(name)) return baseRole === role ? 50 : 0
+      // default to 100% in roster role
+      return baseRole === role ? 100 : 0
+    }
+
+    for (const [name, info] of personMap.entries()) {
+      const f = Number(info?.fte) || 0
+      const baseRole = info?.baseRole
+      if (f <= 0) continue
+      derived.CSM += f * (pctFor(name, 'CSM', baseRole) / 100)
+      derived.PM += f * (pctFor(name, 'PM', baseRole) / 100)
+      derived['Analyst 1'] += f * (pctFor(name, 'Analyst 1', baseRole) / 100)
+    }
+
+    // Apply scenario headcount overrides as proportional scaling vs roster totals.
+    for (const role of ['CSM', 'PM', 'Analyst 1']) {
+      const factor = Number(factorByRole?.[role])
+      if (Number.isFinite(factor) && factor !== 1) derived[role] = derived[role] * factor
+    }
+
+    effectiveFteCount = { ...effectiveFteCount, ...derived }
+  }
+
+  // Build per-person roster map (for capacity sum).
+  const rosterPeople = new Map()
+  for (const p of Array.isArray(roster) ? roster : []) {
+    const name = String(p?.name || '').trim()
+    if (!name) continue
+    const roleRaw = String(p?.role || '').trim()
+    const baseRole = roleRaw === 'Analyst' ? 'Analyst 1' : roleRaw
+    const fte = Number(p?.fte)
+    if (!Number.isFinite(fte) || fte <= 0) continue
+    const prev = rosterPeople.get(name)
+    if (!prev) rosterPeople.set(name, { fte, baseRole })
+    else rosterPeople.set(name, { fte: Math.max(prev.fte || 0, fte), baseRole: prev.baseRole || baseRole })
+  }
+
+  const allocPctTo = (name, role, baseRole) => {
+    const rec = allocationsByPerson?.[name]
+    if (rec && typeof rec === 'object') {
+      const v = rec?.roles?.[role]
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+    }
+    if (isDefaultHalfTime(name)) return baseRole === role ? 50 : 0
+    return baseRole === role ? 100 : 0
+  }
+
+  for (const role of Object.keys(effectiveFteCount)) {
     // Analyst 2 does NOT add capacity. Its demand is incremental pressure.
-    const fte = role === 'Analyst 2' ? 0 : (fteCount[role] || 0)
+    const fte = role === 'Analyst 2' ? 0 : (effectiveFteCount[role] || 0)
     const attrition = (attritionByRole && attritionByRole[role] !== undefined && attritionByRole[role] !== null)
       ? attritionByRole[role]
       : attritionGlobal
 
-    const monthArr =
+    const monthArrBase =
       (hrsPerPersonMonthByMonthByRole && hrsPerPersonMonthByMonthByRole[role]) ||
       hrsPerPersonMonthByMonth ||
       new Array(12).fill(HRS_PER_PERSON_MONTH)
-    const rawMonthlyByMonth = monthArr.map(h => h * fte)
+
+    const rawMonthlyByMonth = new Array(12).fill(0)
+    if (role !== 'Analyst 2') {
+      const factor = Number(factorByRole?.[role])
+      const roleFactor = Number.isFinite(factor) ? factor : 1
+      if (rosterPeople.size === 0) {
+        // Back-compat: if roster isn't present, fall back to role-level FTE math.
+        for (let i = 0; i < 12; i++) rawMonthlyByMonth[i] = (Number(monthArrBase?.[i]) || 0) * fte
+      } else {
+        for (const [name, info] of rosterPeople.entries()) {
+          const personFte = Number(info?.fte) || 0
+          if (personFte <= 0) continue
+          const baseRole = info?.baseRole
+
+          let pct = 0
+          if (role === 'CSM' || role === 'PM' || role === 'Analyst 1') {
+            pct = allocPctTo(name, role, baseRole)
+          } else {
+            pct = baseRole === role ? 100 : 0
+          }
+          if (pct <= 0) continue
+
+          const personDays = rosterDays?.[name]?.daysByMonth || businessDaysByMonth
+          for (let i = 0; i < 12; i++) {
+            const baseDays = businessDaysByMonth?.[i] || 0
+            const days = Number(personDays?.[i] || 0)
+            if (!baseDays || !days) continue
+            const perFteHours = (Number(monthArrBase?.[i]) || 0) * (days / baseDays)
+            rawMonthlyByMonth[i] += perFteHours * personFte * (pct / 100) * roleFactor
+          }
+        }
+      }
+    }
+
+    const hrsPerPersonMonthByMonthEffective =
+      fte > 0
+        ? rawMonthlyByMonth.map(v => (v || 0) / fte)
+        : monthArrBase
+
     const effectiveMonthlyByMonth = rawMonthlyByMonth.map(v => v * attrition)
     const rawAnn = rawMonthlyByMonth.reduce((a, b) => a + (b || 0), 0)
     const effAnn = effectiveMonthlyByMonth.reduce((a, b) => a + (b || 0), 0)
@@ -428,8 +695,8 @@ export function computeCapacityScenario(scenarioCapacityConfig) {
       attritionFactor: attrition,
       hrsPerPersonDay: hrsPerPersonDay ?? 10,
       businessDaysByMonth: businessDaysByMonth || null,
-      hrsPerPersonMonth: monthArr.reduce((a, b) => a + (b || 0), 0) / 12,
-      hrsPerPersonMonthByMonth: monthArr,
+      hrsPerPersonMonth: hrsPerPersonMonthByMonthEffective.reduce((a, b) => a + (b || 0), 0) / 12,
+      hrsPerPersonMonthByMonth: hrsPerPersonMonthByMonthEffective,
     }
   }
 

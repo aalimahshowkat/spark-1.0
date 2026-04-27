@@ -29,6 +29,28 @@ function defaultPlanUrlCandidates() {
   ]
 }
 
+async function fetchBundledDefaultPlanFile() {
+  const urls = defaultPlanUrlCandidates()
+  let res = null
+  let lastErr = null
+  for (const url of urls) {
+    try {
+      // Use no-store so dev changes to public file show up immediately.
+      const r = await fetch(url, { cache: 'no-store' })
+      if (r.ok) { res = r; break }
+      lastErr = new Error(`Default plan not found at ${url} (${r.status}).`)
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  if (!res) throw (lastErr || new Error('Default plan not found.'))
+  const blob = await res.blob()
+  const file = new File([blob], 'SPARK Default Plan.xlsx', {
+    type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  return { file, blob }
+}
+
 function summarizeIngest(ingest) {
   const projects = ingest?.projects || []
   const demandMatrix = ingest?.demandMatrix || []
@@ -91,29 +113,14 @@ export function usePersistedBaseDataset() {
     if (seedInFlightRef.current) return
 
     const seedDefaultPlan = async () => {
-      const urls = defaultPlanUrlCandidates()
-      let res = null
-      let lastErr = null
-      for (const url of urls) {
-        try {
-          // Use no-store so dev changes to public file show up immediately.
-          const r = await fetch(url, { cache: 'no-store' })
-          if (r.ok) { res = r; break }
-          lastErr = new Error(`Default plan not found at ${url} (${r.status}).`)
-        } catch (e) {
-          lastErr = e
-        }
-      }
-      if (!res) throw (lastErr || new Error('Default plan not found.'))
-      const blob = await res.blob()
-      const file = new File([blob], 'SPARK Default Plan.xlsx', {
-        type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      })
+      const { file, blob } = await fetchBundledDefaultPlanFile()
       const ingest = await ingestExcelFile(file)
       const payload = {
         savedAt: nowIso(),
+        isBundledDefault: true,
         sourceFileName: safeText(file.name),
         workbookBlob: blob,
+        capacityConfig: null,
         ingest,
         audit: [
           {
@@ -153,7 +160,7 @@ export function usePersistedBaseDataset() {
 
   const baseSummary = useMemo(() => summarizeIngest(base?.ingest), [base])
 
-  const setBaseFromFile = useCallback(async (file) => {
+  const setBaseFromFile = useCallback(async (file, { capacityConfig } = {}) => {
     if (!file) return null
     setLoading(true)
     setError(null)
@@ -161,8 +168,10 @@ export function usePersistedBaseDataset() {
       const ingest = await ingestExcelFile(file)
       const payload = {
         savedAt: nowIso(),
+        isBundledDefault: false,
         sourceFileName: safeText(file.name),
         workbookBlob: file, // File is a Blob; persisted for "export as-is"
+        capacityConfig: capacityConfig ?? base?.capacityConfig ?? null,
         ingest,
         audit: [
           ...(base?.audit || []),
@@ -183,7 +192,100 @@ export function usePersistedBaseDataset() {
       setLoading(false)
       return null
     }
-  }, [])
+  }, [base])
+
+  const resetToBundledDefaultPlan = useCallback(async ({ editorName = '', note = '' } = {}) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const { file, blob } = await fetchBundledDefaultPlanFile()
+      const ingest = await ingestExcelFile(file)
+      const payload = {
+        savedAt: nowIso(),
+        isBundledDefault: true,
+        sourceFileName: safeText(file.name),
+        workbookBlob: blob,
+        capacityConfig: null,
+        ingest,
+        audit: [
+          ...(base?.audit || []),
+          {
+            at: nowIso(),
+            by: safeText(editorName || localStorage.getItem('spark_editor_name') || ''),
+            action: 'base_reset_to_default_plan',
+            note: safeText(note) || 'Reset to bundled SPARK default plan',
+            sourceFileName: safeText(file.name),
+          }
+        ],
+      }
+      await saveBaseDataset(payload)
+      setBase(payload)
+      setLoading(false)
+      return payload
+    } catch (e) {
+      setError(e?.message || 'Failed to reset to default plan.')
+      setLoading(false)
+      return null
+    }
+  }, [base])
+
+  const resetBaseToSourceWorkbook = useCallback(async ({ editorName = '', note = '' } = {}) => {
+    if (!base?.ingest) return null
+    setLoading(true)
+    setError(null)
+    try {
+      const wb = base?.workbookBlob
+      if (!wb) {
+        // No stored workbook: best-effort reset of "Advanced Planning" settings only.
+        const payload = {
+          ...base,
+          savedAt: nowIso(),
+          capacityConfig: null,
+          audit: [
+            ...(base?.audit || []),
+            {
+              at: nowIso(),
+              by: safeText(editorName || localStorage.getItem('spark_editor_name') || ''),
+              action: 'base_updated',
+              note: safeText(note) || 'Reset planning settings (no workbook available to re-ingest)',
+            }
+          ],
+        }
+        await saveBaseDataset(payload)
+        setBase(payload)
+        setLoading(false)
+        return payload
+      }
+
+      const file = new File([wb], safeText(base?.sourceFileName) || 'plan.xlsx', {
+        type: wb.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })
+      const ingest = await ingestExcelFile(file)
+      const payload = {
+        ...base,
+        savedAt: nowIso(),
+        ingest,
+        capacityConfig: null,
+        audit: [
+          ...(base?.audit || []),
+          {
+            at: nowIso(),
+            by: safeText(editorName || localStorage.getItem('spark_editor_name') || ''),
+            action: 'base_reset_to_source_workbook',
+            note: safeText(note) || 'Reset plan edits and planning settings to the uploaded workbook',
+          }
+        ],
+      }
+      await saveBaseDataset(payload)
+      setBase(payload)
+      setLoading(false)
+      return payload
+    } catch (e) {
+      setError(e?.message || 'Failed to reset plan to source workbook.')
+      setLoading(false)
+      return null
+    }
+  }, [base])
 
   const updateBaseIngest = useCallback(async ({ editorName = '', note = '', mutate }) => {
     if (!base?.ingest) return null
@@ -244,6 +346,67 @@ export function usePersistedBaseDataset() {
     })
   }, [updateBaseIngest])
 
+  const updateBaseCapacityConfig = useCallback(async ({ editorName = '', note = '', capacityConfig }) => {
+    if (!base?.ingest) return null
+    setLoading(true)
+    setError(null)
+    try {
+      const payload = {
+        ...base,
+        savedAt: nowIso(),
+        capacityConfig: capacityConfig ?? null,
+        audit: [
+          ...(base?.audit || []),
+          {
+            at: nowIso(),
+            by: safeText(editorName),
+            action: 'base_updated',
+            note: safeText(note) || 'Updated capacity assumptions',
+          }
+        ],
+      }
+      await saveBaseDataset(payload)
+      setBase(payload)
+      setLoading(false)
+      return payload
+    } catch (e) {
+      setError(e?.message || 'Failed to update base dataset.')
+      setLoading(false)
+      return null
+    }
+  }, [base])
+
+  const detachBaseWorkbook = useCallback(async ({ editorName = '', note = '' } = {}) => {
+    if (!base?.ingest) return null
+    setLoading(true)
+    setError(null)
+    try {
+      const payload = {
+        ...base,
+        savedAt: nowIso(),
+        sourceFileName: '',
+        workbookBlob: null,
+        audit: [
+          ...(base?.audit || []),
+          {
+            at: nowIso(),
+            by: safeText(editorName),
+            action: 'base_updated',
+            note: safeText(note) || 'Detached source workbook (kept plan data)',
+          }
+        ],
+      }
+      await saveBaseDataset(payload)
+      setBase(payload)
+      setLoading(false)
+      return payload
+    } catch (e) {
+      setError(e?.message || 'Failed to detach workbook from base dataset.')
+      setLoading(false)
+      return null
+    }
+  }, [base])
+
   const clearBase = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -266,6 +429,10 @@ export function usePersistedBaseDataset() {
     updateBaseIngest,
     updateBaseProjects,
     updateBaseRoster,
+    updateBaseCapacityConfig,
+    detachBaseWorkbook,
+    resetToBundledDefaultPlan,
+    resetBaseToSourceWorkbook,
     clearBase,
     reload: async () => {
       setLoading(true)

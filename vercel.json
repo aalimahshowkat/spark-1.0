@@ -1,6 +1,17 @@
 {
+  "functions": {
+    "api/chat.js": { "maxDuration": 60 },
+    "api/health.js": { "maxDuration": 10 },
+    "api/auth/login.js": { "maxDuration": 10 },
+    "api/auth/status.js": { "maxDuration": 10 },
+    "api/auth/logout.js": { "maxDuration": 10 }
+  },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/api/auth/status", "destination": "/api/auth/status" },
+    { "source": "/api/auth/login", "destination": "/api/auth/login" },
+    { "source": "/api/auth/logout", "destination": "/api/auth/logout" },
+    { "source": "/api/health", "destination": "/api/health" },
+    { "source": "/api/chat", "destination": "/api/chat" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

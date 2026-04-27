@@ -1,6 +1,7 @@
 import {
   buildDemoAnswer,
-  getAnthropicApiKey,
+  buildRagSystemPrompt,
+  getOpenRouterApiKey,
   getSessionSecret,
   isAuthEnabled,
   parseCookies,
@@ -40,45 +41,89 @@ export default async function handler(req, res) {
   }
 
   sseHeaders(res)
+  try { res.flushHeaders?.() } catch { /* ignore */ }
 
-  const apiKey = getAnthropicApiKey()
-  if (!apiKey) {
-    sseText(res, buildDemoAnswer({ system, messages }))
+  const openRouterKey = getOpenRouterApiKey()
+  if (!openRouterKey) {
+    sseText(res, buildDemoAnswer({ system: buildRagSystemPrompt(system || ''), messages }))
     return res.end()
   }
 
   try {
-    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+    const hasImage = Array.isArray(messages) && messages.some(m => !!m?.image)
+    const orModel =
+      String(model || '').trim() ||
+      String(process.env[hasImage ? 'SPARK_OPENROUTER_VISION_MODEL' : 'SPARK_OPENROUTER_MODEL'] || '').trim() ||
+      (hasImage ? 'openai/gpt-4o-mini' : 'openrouter/auto')
+
+    const ragSystem = buildRagSystemPrompt(system || '')
+
+    // Convert into OpenAI-compatible chat format.
+    const orMessages = []
+    if (ragSystem) orMessages.push({ role: 'system', content: String(ragSystem) })
+    for (const m of (messages || [])) {
+      const role = m?.role === 'assistant' ? 'assistant' : 'user'
+      const text = String(m?.content || '')
+      if (m?.image) {
+        orMessages.push({
+          role,
+          content: [
+            ...(text ? [{ type: 'text', text }] : []),
+            { type: 'image_url', image_url: { url: String(m.image) } },
+          ],
+        })
+      } else {
+        orMessages.push({ role, content: text })
+      }
+    }
+
+    const upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        'Authorization': `Bearer ${openRouterKey}`,
+        // Optional but recommended by OpenRouter for attribution.
+        'HTTP-Referer': process.env.OPENROUTER_SITE_URL || 'http://localhost',
+        'X-Title': process.env.OPENROUTER_APP_NAME || 'SPARK',
       },
       body: JSON.stringify({
-        model: model || 'claude-sonnet-4-20250514',
-        max_tokens: max_tokens || 1024,
-        system: system || '',
-        messages,
+        model: orModel,
+        messages: orMessages,
         stream: true,
+        max_tokens: Number(max_tokens) || 1024,
+        temperature: 0.3,
       }),
     })
 
     if (!upstream.ok) {
       const errBody = await upstream.json().catch(() => ({}))
-      const msg = errBody?.error?.message || `Anthropic API error ${upstream.status}`
+      const msg = errBody?.error?.message || errBody?.message || `OpenRouter API error ${upstream.status}`
       sseWrite(res, { type: 'error', error: msg, status: upstream.status })
       return res.end()
     }
 
+    // OpenRouter streams OpenAI-style SSE. Translate → Anthropic-shaped SSE the UI expects.
     const reader = upstream.body.getReader()
     const decoder = new TextDecoder()
+    let buffer = ''
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      res.write(decoder.decode(value, { stream: true }))
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('data:')) continue
+        const payload = trimmed.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        let obj
+        try { obj = JSON.parse(payload) } catch { continue }
+        const text = obj?.choices?.[0]?.delta?.content
+        if (text) sseWrite(res, { type: 'content_block_delta', delta: { type: 'text_delta', text } })
+      }
     }
-    res.end()
+    return res.end()
   } catch (err) {
     const msg = err?.message || 'Proxy error'
     sseWrite(res, { type: 'error', error: msg })

@@ -12,6 +12,7 @@ import {
   Legend,
 } from './ui'
 import { useEngineInsightsData } from './useEngineInsightsData'
+import { computePersonAvailabilityAdjustmentsByMonth } from '../engine/workingDays.js'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const ROLE_OPTIONS = ['CSM', 'PM', 'Analyst'] // Analyst = Analyst 1 + Analyst 2 combined
@@ -58,6 +59,7 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
     useEngineInsightsData(engineInput, !!engineInput)
 
   const assignments = engineCalc?.assignments || []
+  const planningYear = engineInput?.ingest?.meta?.planningYear || engineInput?.meta?.planningYear || 2026
 
   // Project-level totals across all roles (for “demand for completion”)
   const projectRoleTotals = useMemo(() => {
@@ -97,6 +99,20 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
 
   const peopleOptions = useMemo(() => {
     const set = new Set()
+    // Include roster people even when they have 0 demand, so planners can select
+    // newly-added capacity and see “0 workload” (available) states.
+    const roster = insightsData?.roster || engineInput?.ingest?.roster || engineInput?.roster || []
+    const rosterMatch = (r) => {
+      const rr = String(r?.role || '').trim()
+      if (!rr) return false
+      if (role === 'Analyst') return rr === 'Analyst' || rr === 'Analyst 1' || rr === 'Analyst 2'
+      return rr === role
+    }
+    for (const r of Array.isArray(roster) ? roster : []) {
+      if (!rosterMatch(r)) continue
+      const n = String(r?.name || '').trim()
+      if (n) set.add(n)
+    }
     for (const r of roleRows) {
       if (r?.isUnstaffed) continue
       const p = String(r?.person || '').trim()
@@ -104,13 +120,88 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
       set.add(p)
     }
     return [...set].sort((a, b) => a.localeCompare(b))
-  }, [roleRows])
+  }, [roleRows, role, insightsData?.roster, engineInput])
 
   const effectivePerson = useMemo(() => {
     const p = String(person || '').trim()
     if (!p) return peopleOptions[0] || ''
     return peopleOptions.includes(p) ? p : ''
   }, [person, peopleOptions])
+
+  const availabilityAdj = useMemo(() => {
+    if (!effectivePerson) return null
+    return computePersonAvailabilityAdjustmentsByMonth({
+      year: planningYear,
+      personName: effectivePerson,
+      workingDays: engineInput?.capacityConfig?.workingDays || null,
+    })
+  }, [effectivePerson, planningYear, engineInput?.capacityConfig?.workingDays])
+
+  const availabilitySummary = useMemo(() => {
+    if (!effectivePerson) return null
+    const roleSet = roleMatches
+    const ptoRemovedDays = sumArr(availabilityAdj?.removedByKind?.pto || [])
+    const nonProjectRemovedDays = sumArr(availabilityAdj?.removedByKind?.non_project || [])
+    const weekendAddedDays = sumArr(availabilityAdj?.addedWeekendDaysByMonth || [])
+
+    let unallocatedHours = 0
+    const unallocProjects = new Set()
+    let backfillReceivedHours = 0
+    const backfillReceivedProjects = new Set()
+    const backfillReceivedByProject = new Map()
+    let backfillMovedAwayHours = 0
+    const backfillMovedAwayProjects = new Set()
+    const backfillMovedAwayByProject = new Map()
+
+    for (const r of assignments) {
+      if (!r || !roleSet.has(r.role)) continue
+      const h = safeNum(r.finalHours)
+      if (h <= 0) continue
+      const projKey = r.projectId || r.projectName || ''
+      const projName = String(r.projectName || '').trim() || projKey || '(unknown project)'
+
+      if (r.isUnstaffed && r.unstaffedReason === 'availability' && String(r.sourcePerson || '').trim() === effectivePerson) {
+        unallocatedHours += h
+        if (projKey) unallocProjects.add(projKey)
+      }
+
+      if (!r.isUnstaffed && r.reassignmentReason === 'backfill' && String(r.person || '').trim() === effectivePerson) {
+        backfillReceivedHours += h
+        if (projKey) backfillReceivedProjects.add(projKey)
+        backfillReceivedByProject.set(projName, (backfillReceivedByProject.get(projName) || 0) + h)
+      }
+
+      if (r.reassignmentReason === 'backfill' && String(r.backfillFrom || '').trim() === effectivePerson) {
+        backfillMovedAwayHours += h
+        if (projKey) backfillMovedAwayProjects.add(projKey)
+        backfillMovedAwayByProject.set(projName, (backfillMovedAwayByProject.get(projName) || 0) + h)
+      }
+    }
+
+    const topPairs = (m, n = 4) => {
+      const arr = [...m.entries()].map(([k, v]) => ({ project: k, hours: v }))
+        .sort((a, b) => (b.hours || 0) - (a.hours || 0))
+      return { top: arr.slice(0, n), more: Math.max(0, arr.length - n) }
+    }
+    const recv = topPairs(backfillReceivedByProject)
+    const moved = topPairs(backfillMovedAwayByProject)
+
+    return {
+      ptoRemovedDays,
+      nonProjectRemovedDays,
+      weekendAddedDays,
+      unallocatedHours,
+      unallocProjectCount: unallocProjects.size,
+      backfillReceivedHours,
+      backfillReceivedProjectCount: backfillReceivedProjects.size,
+      backfillReceivedTop: recv.top,
+      backfillReceivedMore: recv.more,
+      backfillMovedAwayHours,
+      backfillMovedAwayProjectCount: backfillMovedAwayProjects.size,
+      backfillMovedAwayTop: moved.top,
+      backfillMovedAwayMore: moved.more,
+    }
+  }, [effectivePerson, roleMatches, availabilityAdj, assignments])
 
   const hasPeopleForRole = peopleOptions.length > 0
   const typedPerson = String(person || '').trim()
@@ -136,6 +227,9 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
     }
     return map
   }, [insightsData])
+
+  // (Intentionally removed) "Projects with unallocated demand (missing assignment)" section
+  // will be reintroduced once roster/project name normalization is finalized.
 
   const topDemandProjects = useMemo(() => {
     const byProject = new Map()
@@ -581,6 +675,7 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
               <Pill type="blue">{projectsForPerson.length} projects contributing</Pill>
             )}
           </div>
+
         </CardBody>
       </Card>
 
@@ -602,6 +697,58 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
                 }))}
                 maxHeight={420}
               />
+
+              {!!availabilitySummary && (
+                <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted, marginBottom: 8 }}>
+                    Availability summary
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12.5, color: C.muted, lineHeight: 1.6 }}>
+                    {(availabilitySummary.weekendAddedDays || 0) > 0 && (
+                      <div>
+                        Worked extra on <strong>{Math.round(availabilitySummary.weekendAddedDays)}</strong> weekend days (adds capacity).
+                      </div>
+                    )}
+                    {((availabilitySummary.ptoRemovedDays || 0) + (availabilitySummary.nonProjectRemovedDays || 0)) > 0 && (
+                      <div>
+                        Unavailable days: <strong>{Math.round(availabilitySummary.ptoRemovedDays)}</strong> PTO + <strong>{Math.round(availabilitySummary.nonProjectRemovedDays)}</strong> non-project (reduces capacity).
+                      </div>
+                    )}
+                    {(availabilitySummary.unallocatedHours || 0) > 0 && (
+                      <div>
+                        Work unallocated due to unavailability: <strong>{Math.round(availabilitySummary.unallocatedHours).toLocaleString()}h</strong> across <strong>{availabilitySummary.unallocProjectCount}</strong> projects.
+                      </div>
+                    )}
+                    {(availabilitySummary.backfillReceivedHours || 0) > 0 && (
+                      <div>
+                        Backfilled work received: <strong>{Math.round(availabilitySummary.backfillReceivedHours).toLocaleString()}h</strong> across <strong>{availabilitySummary.backfillReceivedProjectCount}</strong> projects.
+                        {Array.isArray(availabilitySummary.backfillReceivedTop) && availabilitySummary.backfillReceivedTop.length ? (
+                          <div style={{ marginTop: 4, fontSize: 12, color: C.faint, fontFamily: 'var(--font-mono)' }}>
+                            {availabilitySummary.backfillReceivedTop.map(x => `${x.project} (+${Math.round(x.hours)}h)`).join(' · ')}
+                            {availabilitySummary.backfillReceivedMore ? ` · +${availabilitySummary.backfillReceivedMore} more` : ''}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                    {(availabilitySummary.backfillMovedAwayHours || 0) > 0 && (
+                      <div>
+                        Backfilled work moved away: <strong>{Math.round(availabilitySummary.backfillMovedAwayHours).toLocaleString()}h</strong> across <strong>{availabilitySummary.backfillMovedAwayProjectCount}</strong> projects.
+                        {Array.isArray(availabilitySummary.backfillMovedAwayTop) && availabilitySummary.backfillMovedAwayTop.length ? (
+                          <div style={{ marginTop: 4, fontSize: 12, color: C.faint, fontFamily: 'var(--font-mono)' }}>
+                            {availabilitySummary.backfillMovedAwayTop.map(x => `${x.project} (-${Math.round(x.hours)}h)`).join(' · ')}
+                            {availabilitySummary.backfillMovedAwayMore ? ` · +${availabilitySummary.backfillMovedAwayMore} more` : ''}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                    {(availabilitySummary.weekendAddedDays || 0) > 0 && (
+                      <div style={{ fontSize: 12, color: C.faint }}>
+                        Tip: if utilization still looks high, review which projects drive the busiest months in this heatmap.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </CardBody>
           </Card>
 

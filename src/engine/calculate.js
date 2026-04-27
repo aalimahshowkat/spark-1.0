@@ -68,7 +68,9 @@ import {
   EFFORT_RATES,
   UNSTAFFED_PERSON_NAMES,
   PRIMARY_ROLES,
+  LM_BUCKET_MULTIPLIERS,
 } from './schema.js'
+import { computeRosterWorkingDaysByMonth, computeRosterAvailabilityAdjustmentsByMonth } from './workingDays.js'
 
 const PLANNING_YEAR = 2026
 const ALL_ROLES = ['CSM', 'PM', 'Analyst 1', 'Analyst 2', 'SE']
@@ -90,23 +92,131 @@ const ALL_ROLES = ['CSM', 'PM', 'Analyst 1', 'Analyst 2', 'SE']
  */
 export function runCalculations(projects, demandMatrix, orbitMultipliers = {}, planningYear = PLANNING_YEAR, options = {}) {
   const startTime = Date.now()
+  const capacityConfig = options?.capacityConfig || null
+
+  // Scenario/plan-level overrides for multiplier tables.
+  const orbitMultipliersEffective = (() => {
+    const ov = capacityConfig?.orbitVibeMultipliers
+    if (!ov || typeof ov !== 'object') return orbitMultipliers || {}
+    return { ...(orbitMultipliers || {}), ...(ov || {}) }
+  })()
+
+  const deriveLmMultiplier = (totalLMs, bucketTable = LM_BUCKET_MULTIPLIERS) => {
+    const n = Number(totalLMs)
+    if (!Number.isFinite(n) || n <= 0) return 1
+    const table = Array.isArray(bucketTable) ? bucketTable : LM_BUCKET_MULTIPLIERS
+    for (const tier of table) {
+      const max = Number(tier?.maxLMs)
+      const mult = Number(tier?.multiplier)
+      if (!Number.isFinite(max) || !Number.isFinite(mult)) continue
+      if (n <= max) return mult
+    }
+    // Above highest tier → use last multiplier (or 2.0 fallback).
+    const last = table?.[table.length - 1]
+    const lm = Number(last?.multiplier)
+    return Number.isFinite(lm) ? lm : 2
+  }
+
+  const applyLmBucketOverrides = (projectsIn) => {
+    const table = capacityConfig?.lmBucketMultipliers
+    if (!Array.isArray(table) || table.length === 0) return projectsIn
+    const out = []
+    for (const p of (Array.isArray(projectsIn) ? projectsIn : [])) {
+      if (!p) continue
+      const totalLMs = Number(p.totalLMs || 0)
+      const current = Number(p.lmMultiplier)
+      const baselineDerived = deriveLmMultiplier(totalLMs, LM_BUCKET_MULTIPLIERS)
+      const looksDerived = Number.isFinite(current) && Number.isFinite(baselineDerived) && current === baselineDerived
+      if (!looksDerived) { out.push(p); continue }
+      const next = deriveLmMultiplier(totalLMs, table)
+      out.push(next === current ? p : { ...p, lmMultiplier: next })
+    }
+    return out
+  }
+
+  const applyPmTaskMultipliers = (projectsIn) => {
+    const pm = capacityConfig?.pmTaskMultipliers
+    if (!pm || typeof pm !== 'object') return projectsIn
+    const demandTasks = options?.demandTasks
+    if (!Array.isArray(demandTasks) || demandTasks.length === 0) return projectsIn
+
+    const overrides = pm?.overridesByKey || {}
+    const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
+    const phases = ['Project Start M0','Project Start M1','Project Mid','Project End M-1','Project End M0','Project End M1','Project End M1+']
+
+    const basePmRows = demandTasks.filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
+    if (basePmRows.length === 0) return projectsIn
+
+    const totalsByStage = new Map()
+    for (const r of basePmRows) {
+      const stage = String(r?.stage || '').trim()
+      const taskStage = String(r?.taskStage || '').trim()
+      if (!stage || !taskStage) continue
+      const key = normKey(stage, taskStage)
+      const ov = overrides?.[key]
+      const ph = { ...(r.phaseHours || {}) }
+      if (ov && typeof ov === 'object') {
+        for (const k of phases) {
+          if (ov[k] !== undefined && ov[k] !== null && Number.isFinite(+ov[k])) ph[k] = +ov[k]
+        }
+      }
+      if (!totalsByStage.has(stage)) {
+        const init = {}
+        for (const k of phases) init[k] = 0
+        totalsByStage.set(stage, init)
+      }
+      const tgt = totalsByStage.get(stage)
+      for (const k of phases) tgt[k] += (parseFloat(ph?.[k]) || 0)
+    }
+
+    if (totalsByStage.size === 0) return projectsIn
+    return (Array.isArray(projectsIn) ? projectsIn : []).map(p => {
+      const st = String(p?.vibeType || '').trim()
+      const ph = totalsByStage.get(st)
+      if (!ph) return p
+      return { ...p, phaseHours: { ...ph } }
+    })
+  }
 
   // Build a fast lookup index from demand matrix rows
   const matrixIndex = buildMatrixIndex(demandMatrix)
 
+  // Apply plan-level multiplier overrides by producing a modified project list.
+  let effectiveProjects = Array.isArray(projects) ? projects : []
+  effectiveProjects = applyLmBucketOverrides(effectiveProjects)
+  effectiveProjects = applyPmTaskMultipliers(effectiveProjects)
+
   // Compute all assignments (project × role × month)
   const assignments = []
-  for (const project of projects) {
+  for (const project of effectiveProjects) {
     if (!project.startDate || !project.deliveryDate) continue  // skip DQ-E001 projects
     if (!project.vibeType || !VIBE_PHASE_HOURS[project.vibeType]) continue
 
     for (const role of ALL_ROLES) {
       const roleAssignments = computeProjectRoleAssignments(
-        project, role, matrixIndex, orbitMultipliers, planningYear
+        project, role, matrixIndex, orbitMultipliersEffective, planningYear
       )
       assignments.push(...roleAssignments)
     }
   }
+
+  // ── Working-days availability → unstaffed demand ──────────────────────
+  // If working day calendars reduce a person's available working days in a month,
+  // treat the "uncovered" portion of their assigned hours as unstaffed/unallocated.
+  // This prevents PTO/non-working time from misleadingly inflating utilization %.
+  applyWorkingDaysAvailabilityToAssignments(assignments, {
+    planningYear,
+    roster: options?.roster || [],
+    capacityConfig,
+  })
+
+  // ── Backfills / reassignment overrides (date-range based) ──────────────
+  // Moves a fraction of monthly hours from one person to another for the given range.
+  // This is used to model PTO coverage without changing total demand.
+  applyAssignmentBackfills(assignments, {
+    planningYear,
+    capacityConfig,
+  })
 
   // ── Aggregate: demand by role × month ──
   const demandByRole = aggregateByRole(assignments)
@@ -199,6 +309,234 @@ export function runCalculations(projects, demandMatrix, orbitMultipliers = {}, p
       durationMs: Date.now() - startTime,
     }
   }
+}
+
+function applyAssignmentBackfills(assignments, { planningYear = PLANNING_YEAR, capacityConfig = null } = {}) {
+  if (!Array.isArray(assignments) || assignments.length === 0) return
+  const backfills = capacityConfig?.assignmentBackfills
+  if (!backfills || typeof backfills !== 'object') return
+
+  const baseBusinessDaysByMonth = getBusinessDaysByMonth(planningYear)
+
+  const safeTextLocal = (s) => String(s || '').trim()
+  const parseIsoDateOnly = (iso) => {
+    const s = safeTextLocal(iso)
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    if (!m) return null
+    const y = Number(m[1]); const mo = Number(m[2]); const d = Number(m[3])
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null
+    if (mo < 1 || mo > 12) return null
+    if (d < 1 || d > 31) return null
+    const dt = new Date(Date.UTC(y, mo - 1, d))
+    if (!Number.isFinite(dt.getTime())) return null
+    if (dt.getUTCFullYear() !== y || (dt.getUTCMonth() + 1) !== mo || dt.getUTCDate() !== d) return null
+    return dt
+  }
+  const clampRangeToYear = ({ startDate, endDate, year }) => {
+    const y = Number(year)
+    if (!Number.isFinite(y)) return null
+    const s = startDate instanceof Date ? startDate : parseIsoDateOnly(startDate)
+    const e = endDate instanceof Date ? endDate : parseIsoDateOnly(endDate)
+    if (!s || !e) return null
+    const start = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()))
+    const end = new Date(Date.UTC(e.getUTCFullYear(), e.getUTCMonth(), e.getUTCDate()))
+    if (end < start) return null
+    const yearStart = new Date(Date.UTC(y, 0, 1))
+    const yearEnd = new Date(Date.UTC(y, 11, 31))
+    const cs = start < yearStart ? yearStart : start
+    const ce = end > yearEnd ? yearEnd : end
+    if (ce < cs) return null
+    return { start: cs, end: ce }
+  }
+  const weekdaysOverlapCountsByMonth = (range, year) => {
+    const out = new Array(12).fill(0)
+    const clamped = clampRangeToYear({ startDate: range?.startDate, endDate: range?.endDate, year })
+    if (!clamped) return out
+    let d = new Date(clamped.start)
+    while (d <= clamped.end) {
+      const wd = d.getUTCDay()
+      if (wd >= 1 && wd <= 5) out[d.getUTCMonth()] += 1
+      d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1))
+    }
+    return out
+  }
+
+  const entries = []
+  for (const [projectId, byRole] of Object.entries(backfills || {})) {
+    if (!byRole || typeof byRole !== 'object') continue
+    for (const [role, arr] of Object.entries(byRole || {})) {
+      for (const e of (Array.isArray(arr) ? arr : [])) {
+        if (!e) continue
+        const fromPerson = safeTextLocal(e.fromPerson)
+        const toPerson = safeTextLocal(e.toPerson)
+        const sd = safeTextLocal(e.startDate)
+        const ed = safeTextLocal(e.endDate) || sd
+        if (!projectId || !role || !fromPerson || !toPerson || !sd) continue
+        entries.push({
+          id: e.id || null,
+          projectId,
+          role,
+          fromPerson,
+          toPerson,
+          startDate: sd,
+          endDate: ed,
+          note: safeTextLocal(e.note),
+        })
+      }
+    }
+  }
+  if (entries.length === 0) return
+  entries.sort((a, b) => {
+    if (a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate)
+    if (a.projectId !== b.projectId) return a.projectId.localeCompare(b.projectId)
+    if (a.role !== b.role) return a.role.localeCompare(b.role)
+    return String(a.id || '').localeCompare(String(b.id || ''))
+  })
+
+  const extra = []
+
+  for (const e of entries) {
+    const overlap = weekdaysOverlapCountsByMonth({ startDate: e.startDate, endDate: e.endDate }, planningYear)
+    for (let mi = 0; mi < 12; mi++) {
+      const bd = Number(baseBusinessDaysByMonth?.[mi] || 0)
+      if (!(bd > 0)) continue
+      const od = Number(overlap[mi] || 0)
+      if (!(od > 0)) continue
+      const frac = Math.min(1, Math.max(0, od / bd))
+      if (!(frac > 0)) continue
+
+      // Collect matching source rows (there is usually just one).
+      const isFromUnassigned = e.fromPerson === 'Unassigned'
+      const sources = []
+      for (const row of assignments) {
+        if (!row) continue
+        if (row.projectId !== e.projectId) continue
+        if (row.role !== e.role) continue
+        if (row.monthIndex !== mi) continue
+        if (isFromUnassigned) {
+          if (!row.isUnstaffed) continue
+          if (String(row.person || '').trim() !== 'Unassigned') continue
+        } else {
+          if (row.isUnstaffed) continue
+          if (String(row.person || '').trim() !== e.fromPerson) continue
+        }
+        const h = Number(row.finalHours)
+        if (!Number.isFinite(h) || h <= 0) continue
+        sources.push(row)
+      }
+      if (sources.length === 0) continue
+
+      const totalFrom = sources.reduce((s, r) => s + (Number(r.finalHours) || 0), 0)
+      const wantMove = Math.round(totalFrom * frac)
+      if (!(wantMove > 0)) continue
+
+      let remaining = wantMove
+      for (const src of sources) {
+        if (remaining <= 0) break
+        const cur = Number(src.finalHours) || 0
+        if (cur <= 0) continue
+        const take = Math.min(cur, remaining)
+        if (take <= 0) continue
+        src.finalHours = cur - take
+        remaining -= take
+        extra.push({
+          ...src,
+          person: e.toPerson,
+          isUnstaffed: e.toPerson === 'Unassigned',
+          finalHours: take,
+          reassignmentReason: 'backfill',
+          backfillId: e.id || null,
+          backfillFrom: e.fromPerson,
+          backfillTo: e.toPerson,
+          backfillNote: e.note || null,
+        })
+      }
+    }
+  }
+
+  if (extra.length) assignments.push(...extra)
+}
+
+function applyWorkingDaysAvailabilityToAssignments(assignments, { planningYear = PLANNING_YEAR, roster = [], capacityConfig = null } = {}) {
+  if (!Array.isArray(assignments) || assignments.length === 0) return
+  const wd = capacityConfig?.workingDays
+  if (!wd || typeof wd !== 'object') return
+  if (!Array.isArray(roster) || roster.length === 0) return
+
+  const baseBusinessDaysByMonth = getBusinessDaysByMonth(planningYear)
+  // Calendar-aware working days (org/role/person). Includes weekend additions.
+  const rosterDays = computeRosterWorkingDaysByMonth({
+    year: planningYear,
+    baseBusinessDaysByMonth,
+    roster,
+    workingDays: wd,
+  })
+  // Only person-level removals (PTO / non-project) should auto-unallocate demand.
+  // Org/role holidays reduce capacity but should not be treated as "unstaffed work".
+  const personAdjByName = computeRosterAvailabilityAdjustmentsByMonth({
+    year: planningYear,
+    roster,
+    workingDays: wd,
+  })
+
+  const extra = []
+  for (const row of assignments) {
+    if (!row || row.isUnstaffed) continue
+    const person = String(row.person || '').trim()
+    if (!person) continue
+    const mi = Number(row.monthIndex)
+    if (!Number.isFinite(mi) || mi < 0 || mi > 11) continue
+
+    const baseDays = Number(baseBusinessDaysByMonth?.[mi] || 0)
+    if (!(baseDays > 0)) continue
+    const removed = Number(personAdjByName?.[person]?.removedWeekdaysByMonth?.[mi] || 0)
+    if (!Number.isFinite(removed) || removed <= 0) continue
+
+    // To prevent PTO from inflating utilization, the staffed fraction should align with the
+    // capacity scaling used for this person/month. Capacity uses calendar-aware working days
+    // and includes weekend additions; demand should NOT increase due to weekend work.
+    const weekendAdded = Number(personAdjByName?.[person]?.addedWeekendDaysByMonth?.[mi] || 0)
+    const personDays = Number(rosterDays?.[person]?.daysByMonth?.[mi])
+    if (!Number.isFinite(personDays)) continue
+    const personDaysNoWeekend = Math.max(0, Math.round(personDays - (Number.isFinite(weekendAdded) ? weekendAdded : 0)))
+
+    // Align with capacity fraction (excluding weekend additions). This ensures PTO doesn't
+    // artificially spike utilization in months where other calendars (org/role) also reduce days.
+    const deliverableFraction = Math.min(1, Math.max(0, personDaysNoWeekend / baseDays))
+    if (deliverableFraction >= 0.9999) continue
+
+    const total = Number(row.finalHours)
+    if (!Number.isFinite(total) || total <= 0) continue
+
+    const staffed = Math.max(0, Math.min(total, Math.round(total * deliverableFraction)))
+    const unstaffed = Math.max(0, total - staffed)
+    if (unstaffed <= 0) continue
+
+    // Mutate the original row to keep it staffed-only.
+    row.finalHours = staffed
+
+    const kind = (() => {
+      const byKind = personAdjByName?.[person]?.removedByKind || null
+      const pto = Number(byKind?.pto?.[mi] || 0)
+      const non = Number(byKind?.non_project?.[mi] || 0)
+      if (pto > 0) return 'pto'
+      if (non > 0) return 'non_project'
+      return 'availability'
+    })()
+
+    // Add a synthetic unstaffed row to preserve total role demand.
+    extra.push({
+      ...row,
+      person: 'Unassigned',
+      isUnstaffed: true,
+      finalHours: unstaffed,
+      unstaffedReason: 'availability',
+      sourcePerson: person,
+      sourceKind: kind,
+    })
+  }
+
+  if (extra.length) assignments.push(...extra)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -619,17 +957,184 @@ export function computeCapacity({ planningYear = PLANNING_YEAR, roster = [], cap
   const hrsPerPersonMonthByMonth =
     capacityConfig?.hrsPerPersonMonthByMonth ||
     businessDaysByMonth.map(d => d * hrsPerPersonDay)
-  const hrsPerPersonMonthByMonthByRole = capacityConfig?.hrsPerPersonMonthByMonthByRole || null
 
-  const fteCount = capacityConfig?.fteCount || getFteCountFromRoster(roster)
+  const clampDay = (n) => {
+    const v = Number(n)
+    if (!Number.isFinite(v)) return null
+    return Math.max(0, Math.min(24, v))
+  }
+
+  const fromDayByRole = (() => {
+    const raw = capacityConfig?.hrsPerPersonDayByRole
+    if (!raw || typeof raw !== 'object') return null
+    const out = {}
+    for (const [roleRaw, val] of Object.entries(raw)) {
+      const key = roleRaw === 'Analyst' ? 'Analyst 1' : roleRaw
+      const day = clampDay(val)
+      if (day === null) continue
+      out[key] = businessDaysByMonth.map(d => d * day)
+    }
+    return Object.keys(out).length ? out : null
+  })()
+
+  const hrsPerPersonMonthByMonthByRole =
+    capacityConfig?.hrsPerPersonMonthByMonthByRole ||
+    fromDayByRole ||
+    null
+
+  let fteCount = capacityConfig?.fteCount || getFteCountFromRoster(roster)
+
+  // Optional: per-person allocations to roles (constant for the year).
+  // Computes effective FTE per role = Σ(personFte × allocationPctToRole).
+  // Also supports org-wide defaults (e.g., a named person is treated as 50% available unless overridden).
+  const alloc = capacityConfig?.allocationsByPerson
+  const DEFAULT_HALF_TIME_NAME = 'Aalimah Showkat'
+  const isDefaultHalfTime = (name) => String(name || '').trim().toLowerCase() === DEFAULT_HALF_TIME_NAME.toLowerCase()
+  const hasDefaultHalfTime = Array.isArray(roster) && roster.some(p => isDefaultHalfTime(p?.name))
+
+  if (Array.isArray(roster) && roster.length > 0 && (
+    (alloc && typeof alloc === 'object' && Object.keys(alloc).length > 0) || hasDefaultHalfTime
+  )) {
+    const rosterTotals = getFteCountFromRoster(roster)
+    const personMap = new Map() // name -> { fte, baseRole }
+    for (const p of roster) {
+      const name = String(p?.name || '').trim()
+      if (!name) continue
+      const role = String(p?.role || '').trim()
+      const fte = Number(p?.fte)
+      if (!Number.isFinite(fte) || fte <= 0) continue
+      const baseRole = role === 'Analyst' ? 'Analyst 1' : role
+      const prev = personMap.get(name)
+      // If duplicates exist, take max to avoid double counting.
+      if (!prev) personMap.set(name, { fte, baseRole })
+      else personMap.set(name, { fte: Math.max(prev.fte || 0, fte), baseRole: prev.baseRole || baseRole })
+    }
+
+    const next = { ...fteCount }
+    // Only recompute the modeled capacity-owning roles. (Analyst 2 capacity stays 0 later.)
+    next.CSM = 0
+    next.PM = 0
+    next['Analyst 1'] = 0
+
+    const pctFor = (name, role, baseRole) => {
+      const rec = alloc?.[name]
+      if (rec && typeof rec === 'object') {
+        const v = rec?.roles?.[role]
+        const n = Number(v)
+        return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+      }
+      // Org-wide default: treat this named person as 50% available to their roster role.
+      if (isDefaultHalfTime(name)) return baseRole === role ? 50 : 0
+      // If any allocations are present but this person is not configured,
+      // default 100% to their roster role to preserve backward behavior.
+      return baseRole === role ? 100 : 0
+    }
+
+    for (const [name, info] of personMap.entries()) {
+      const f = Number(info?.fte) || 0
+      const baseRole = info?.baseRole
+      if (f <= 0) continue
+      next.CSM += f * (pctFor(name, 'CSM', baseRole) / 100)
+      next.PM += f * (pctFor(name, 'PM', baseRole) / 100)
+      next['Analyst 1'] += f * (pctFor(name, 'Analyst 1', baseRole) / 100)
+    }
+
+    // If a scenario (or advanced config) overrides role-level FTE totals,
+    // scale the allocation-derived effective FTE so overrides still apply.
+    // This keeps "Role Overrides (Global)" meaningful even when allocations are present.
+    for (const role of ['CSM', 'PM', 'Analyst 1']) {
+      const base = Number(rosterTotals?.[role] || 0)
+      const target = Number(fteCount?.[role] || 0)
+      if (base > 0 && Number.isFinite(target) && target !== base) {
+        next[role] = next[role] * (target / base)
+      } else if (base === 0 && Number.isFinite(target) && target > 0) {
+        next[role] = target
+      }
+    }
+
+    fteCount = next
+  }
   const attritionGlobal = capacityConfig?.attritionGlobal ?? ATTRITION_FACTOR
   const attritionByRole = capacityConfig?.attritionByRole || {}
+
+  // Optional: working-day calendars (org/role/person) adjust per-person business days.
+  const rosterDays = computeRosterWorkingDaysByMonth({
+    year: planningYear,
+    baseBusinessDaysByMonth: businessDaysByMonth,
+    roster,
+    workingDays: capacityConfig?.workingDays || null,
+  })
+
+  // Precompute per-person contribution factors.
+  const rosterPeople = new Map() // name -> { fte, baseRole }
+  for (const p of Array.isArray(roster) ? roster : []) {
+    const name = String(p?.name || '').trim()
+    if (!name) continue
+    const roleRaw = String(p?.role || '').trim()
+    const baseRole = roleRaw === 'Analyst' ? 'Analyst 1' : roleRaw
+    const f = Number(p?.fte)
+    if (!Number.isFinite(f) || f <= 0) continue
+    const prev = rosterPeople.get(name)
+    if (!prev) rosterPeople.set(name, { fte: f, baseRole })
+    else rosterPeople.set(name, { fte: Math.max(prev.fte || 0, f), baseRole: prev.baseRole || baseRole })
+  }
+
+  // Helper: allocation percent to modeled roles; default to roster role.
+  const allocPctTo = (name, role, baseRole) => {
+    const rec = alloc?.[name]
+    if (rec && typeof rec === 'object') {
+      const v = rec?.roles?.[role]
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+    }
+    if (isDefaultHalfTime(name)) return baseRole === role ? 50 : 0
+    return baseRole === role ? 100 : 0
+  }
 
   for (const role of PRIMARY_ROLES) {
     // Analyst 2 does NOT add capacity. Its demand is incremental pressure.
     const fte = role === 'Analyst 2' ? 0 : (fteCount[role] || 0)
-    const monthArr = (hrsPerPersonMonthByMonthByRole && hrsPerPersonMonthByMonthByRole[role]) || hrsPerPersonMonthByMonth
-    const rawMonthlyByMonth = monthArr.map(h => h * fte)
+    const monthArrBase = (hrsPerPersonMonthByMonthByRole && hrsPerPersonMonthByMonthByRole[role]) || hrsPerPersonMonthByMonth
+
+    // Calendar-aware per-person monthly capacity summed across roster.
+    const rawMonthlyByMonth = new Array(12).fill(0)
+    if (role !== 'Analyst 2') {
+      if (rosterPeople.size === 0) {
+        // Back-compat: if roster isn't present in the workbook, fall back to role-level FTE math.
+        for (let i = 0; i < 12; i++) rawMonthlyByMonth[i] = (Number(monthArrBase?.[i]) || 0) * fte
+      } else {
+        for (const [name, info] of rosterPeople.entries()) {
+          const personFte = Number(info?.fte) || 0
+          if (personFte <= 0) continue
+          const baseRole = info?.baseRole
+
+          let pct = 0
+          if (role === 'CSM' || role === 'PM' || role === 'Analyst 1') {
+            pct = allocPctTo(name, role, baseRole)
+          } else {
+            // Non-modeled roles (e.g., SE): default 100% to their roster role.
+            pct = baseRole === role ? 100 : 0
+          }
+          if (pct <= 0) continue
+
+          const personDays = rosterDays?.[name]?.daysByMonth || businessDaysByMonth
+          for (let i = 0; i < 12; i++) {
+            const baseDays = businessDaysByMonth[i] || 0
+            const days = Number(personDays?.[i] || 0)
+            if (!baseDays || !days) continue
+            const perFteHours = (Number(monthArrBase?.[i]) || 0) * (days / baseDays)
+            rawMonthlyByMonth[i] += perFteHours * personFte * (pct / 100)
+          }
+        }
+      }
+    }
+
+    // Derive per-FTE hours from the computed raw capacity so FTE-needed math stays accurate
+    // when working days vary across people.
+    const hrsPerPersonMonthByMonthEffective =
+      fte > 0
+        ? rawMonthlyByMonth.map(v => (v || 0) / fte)
+        : monthArrBase
     const attrition = (attritionByRole && attritionByRole[role] !== undefined && attritionByRole[role] !== null)
       ? attritionByRole[role]
       : attritionGlobal
@@ -648,8 +1153,8 @@ export function computeCapacity({ planningYear = PLANNING_YEAR, roster = [], cap
       attritionFactor:  attrition,
       hrsPerPersonDay,
       businessDaysByMonth,
-      hrsPerPersonMonth: (monthArr.reduce((a, b) => a + (b || 0), 0) / 12),
-      hrsPerPersonMonthByMonth: monthArr,
+      hrsPerPersonMonth: (hrsPerPersonMonthByMonthEffective.reduce((a, b) => a + (b || 0), 0) / 12),
+      hrsPerPersonMonthByMonth: hrsPerPersonMonthByMonthEffective,
     }
   }
 

@@ -13,8 +13,10 @@ import LogicLayerView    from './components/LogicLayerView'
 import ExportsView       from './components/ExportsView'
 import ScenarioView      from './components/ScenarioView'
 import SparkAiView       from './components/SparkAiView'
+import UserGuideView     from './components/UserGuideView'
 import SparkAssistantWidget from './components/SparkAssistantWidget'
 import LoginView         from './components/LoginView'
+import CapacitySetupView from './components/CapacitySetupView'
 import { useEngineCalc } from './components/useEngineCalc'
 import { usePersistedBaseDataset } from './components/usePersistedBaseDataset'
 import { validateSparkWorkbookFile } from './engine/workbookValidator.js'
@@ -58,6 +60,7 @@ export const NAV = [
     label: 'Intelligence',
     items: [
       { id: 'ai',         label: 'SPARK AI',     icon: IconAI,       alwaysEnabled: true, badge: 'New' },
+      { id: 'guide',      label: 'User Guide',   icon: IconGuide,    alwaysEnabled: true },
     ]
   },
   ...(SHOW_ADVANCED ? [{
@@ -84,18 +87,33 @@ function AppInner({ onLogout }) {
   const [uploadedFile, setUploadedFile] = useState(null)
   const [insightsSource, setInsightsSource] = useState('engine')
   const [datasetMode,  setDatasetMode]  = useState('override')
+  const [capacityConfigOverride, setCapacityConfigOverride] = useState(null) // session-only (override mode)
+  const [rosterOverride, setRosterOverride] = useState(null)   // session-only (override mode)
+  const [projectsOverride, setProjectsOverride] = useState(null) // session-only (override mode)
 
   const { base, baseSummary, loading: baseLoading, error: baseError,
-          setBaseFromFile, updateBaseProjects, updateBaseRoster, clearBase } = usePersistedBaseDataset()
+          setBaseFromFile, updateBaseProjects, updateBaseRoster, updateBaseCapacityConfig,
+          detachBaseWorkbook, resetToBundledDefaultPlan, resetBaseToSourceWorkbook, clearBase } = usePersistedBaseDataset()
+
+  const effectiveCapacityConfig = useMemo(() => {
+    if (datasetMode === 'base') return base?.capacityConfig || null
+    return capacityConfigOverride ?? (base?.capacityConfig || null)
+  }, [datasetMode, base?.capacityConfig, capacityConfigOverride])
 
   const engineInput = useMemo(() => {
     if (datasetMode === 'base') {
-      return base?.ingest ? { kind: 'ingest', ingest: base.ingest } : null
+      return base?.ingest ? { kind: 'ingest', ingest: base.ingest, capacityConfig: base?.capacityConfig || null } : null
     }
-    return uploadedFile ? { kind: 'file', file: uploadedFile } : null
-  }, [datasetMode, base?.ingest, uploadedFile])
+    return uploadedFile ? {
+      kind: 'file',
+      file: uploadedFile,
+      capacityConfig: effectiveCapacityConfig,
+      rosterOverride,
+      projectsOverride,
+    } : null
+  }, [datasetMode, base?.ingest, base?.capacityConfig, uploadedFile, effectiveCapacityConfig, rosterOverride, projectsOverride])
 
-  const { calc: engineCalc } = useEngineCalc(engineInput)
+  const { calc: engineCalc, ingest: engineIngest } = useEngineCalc(engineInput)
   const hasEngineInput   = !!engineInput
   const canRenderInsights = !!data || hasEngineInput
 
@@ -128,6 +146,9 @@ function AppInner({ onLogout }) {
       // Accept file only after validation passes.
       setUploadedFile(file)
       setDatasetMode('override')
+      setCapacityConfigOverride(null)
+      setRosterOverride(null)
+      setProjectsOverride(null)
       const parsed = await parseExcelFile(file)
       parsed.meta.fileName = file.name
       setData(parsed)
@@ -149,15 +170,24 @@ function AppInner({ onLogout }) {
     }
   }, [])
 
+  const updateOverrideRoster = useCallback(async ({ roster }) => {
+    setRosterOverride(Array.isArray(roster) ? roster : null)
+  }, [])
+
+  const updateOverrideProjects = useCallback(async ({ projects }) => {
+    setProjectsOverride(Array.isArray(projects) ? projects : null)
+  }, [])
+
   const handlePromoteToBase = useCallback(async () => {
     if (!uploadedFile) return
-    const saved = await setBaseFromFile(uploadedFile)
+    const saved = await setBaseFromFile(uploadedFile, { capacityConfig: effectiveCapacityConfig })
     if (saved?.ingest) {
       setDatasetMode('base')
       setFileName(uploadedFile.name)
       setNotice('Plan saved — loads automatically next session.')
+      setCapacityConfigOverride(null)
     }
-  }, [uploadedFile, setBaseFromFile])
+  }, [uploadedFile, setBaseFromFile, effectiveCapacityConfig])
 
   const handleClearBase = useCallback(async () => {
     await clearBase()
@@ -165,8 +195,34 @@ function AppInner({ onLogout }) {
     setData(null)
     setFileName(null)
     setUploadedFile(null)
+    setCapacityConfigOverride(null)
+    setRosterOverride(null)
+    setProjectsOverride(null)
     setActiveTab('plan')
   }, [clearBase])
+
+  const removeUploadedWorkbook = useCallback(async () => {
+    setUploadedFile(null)
+    setData(null)
+    setCapacityConfigOverride(null)
+    setRosterOverride(null)
+    setProjectsOverride(null)
+    if (base?.ingest) {
+      setDatasetMode('base')
+      const name = base?.sourceFileName || base?.ingest?.meta?.fileName || 'Current plan'
+      setFileName(name)
+    } else {
+      setDatasetMode('override')
+      setFileName(null)
+    }
+    setActiveTab('plan')
+  }, [base])
+
+  const clearUploadedPlanEdits = useCallback(async () => {
+    setCapacityConfigOverride(null)
+    setRosterOverride(null)
+    setProjectsOverride(null)
+  }, [])
 
   const isTabEnabled = useCallback((item) => {
     if (!item) return false
@@ -184,6 +240,15 @@ function AppInner({ onLogout }) {
   }
 
   const planName = fileName || 'Current plan'
+
+  const handleUpdateCapacityConfig = useCallback(async ({ capacityConfig, note }) => {
+    // Persist if using saved plan; otherwise keep as session-only until "Save as plan".
+    if (datasetMode === 'base') {
+      await updateBaseCapacityConfig?.({ capacityConfig, note: note || 'Updated capacity settings' })
+    } else {
+      setCapacityConfigOverride(capacityConfig || null)
+    }
+  }, [datasetMode, updateBaseCapacityConfig])
 
   return (
     <div style={{ display:'flex', minHeight:'100vh', background:'var(--surface-base)' }}>
@@ -221,10 +286,31 @@ function AppInner({ onLogout }) {
                 onClearBase={handleClearBase}
                 onUpdateBaseProjects={updateBaseProjects}
                 onUpdateBaseRoster={updateBaseRoster}
+                onUpdateCapacityConfig={handleUpdateCapacityConfig}
+                onDetachBaseWorkbook={detachBaseWorkbook}
+                onResetToBundledDefaultPlan={resetToBundledDefaultPlan}
+                onResetBaseToSourceWorkbook={resetBaseToSourceWorkbook}
+                onRemoveUploadedWorkbook={removeUploadedWorkbook}
+                onClearUploadedPlanEdits={clearUploadedPlanEdits}
+                onUpdateOverrideProjects={updateOverrideProjects}
+                onUpdateOverrideRoster={updateOverrideRoster}
+                engineIngest={engineIngest}
+                effectiveCapacityConfig={effectiveCapacityConfig}
                 hasOverride={!!uploadedFile}
                 uploadedFileName={uploadedFile?.name}
                 engineInput={engineInput}
                 onGoToOverview={() => setActiveTab('overview')}
+                onGoToCapacitySetup={() => setActiveTab('capacitySetup')}
+              />
+            )}
+            {activeTab === 'capacitySetup' && (
+              <CapacitySetupView
+                engineInput={engineInput}
+                capacityConfig={effectiveCapacityConfig}
+                datasetMode={datasetMode}
+                planName={planName}
+                onBack={() => setActiveTab('plan')}
+                onUpdateCapacityConfig={handleUpdateCapacityConfig}
               />
             )}
             {activeTab === 'overview' && canRenderInsights && (
@@ -247,6 +333,9 @@ function AppInner({ onLogout }) {
             )}
             {activeTab === 'ai' && (
               <SparkAiView engineCalc={engineCalc} engineInput={engineInput} planName={planName} />
+            )}
+            {activeTab === 'guide' && (
+              <UserGuideView onNavigate={setActiveTab} />
             )}
             {activeTab === 'exports' && (
               <ExportsView
@@ -431,6 +520,9 @@ export function IconScenario({ size=16, color='currentColor' }) {
 }
 export function IconAI({ size=16, color='currentColor' }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+}
+export function IconGuide({ size=16, color='currentColor' }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/><path d="M8 6h8"/><path d="M8 10h8"/><path d="M8 14h6"/></svg>
 }
 export function IconDataEngine({ size=16, color='currentColor' }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>

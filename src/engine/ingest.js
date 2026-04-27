@@ -75,6 +75,7 @@ export function ingestWorkbook(wb, metaIn = {}) {
   const hasOrbitColumn = projectListHasOrbitColumn(rawProjects)
   const projects       = parseProjects(rawProjects, hasOrbitColumn)
   const demandMatrix   = parseDemandMatrix(rawDemandMatrix)
+  const demandTasks    = parseDemandTasks(rawDemandMatrix)
   const quality        = runDataQualityChecks(projects)
   const roster         = seedRosterFromProjects(projects)
 
@@ -89,7 +90,7 @@ export function ingestWorkbook(wb, metaIn = {}) {
     sheetsFound:    wb.SheetNames,
   }
 
-  return { projects, demandMatrix, orbitMultipliers, quality, roster, meta }
+  return { projects, demandMatrix, demandTasks, orbitMultipliers, quality, roster, meta }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -440,6 +441,47 @@ function parseDemandMatrix(rows) {
     })
   })
 
+  return results
+}
+
+/**
+ * Parse the LEFT-side task-level section of the Demand Base Matrix.
+ * Shape: Customer Journey Stage → Stage → Role → phase hours.
+ *
+ * Note: This is used for scenario-only overrides of the PM task table ("PM multipliers").
+ */
+function parseDemandTasks(rows) {
+  const results = []
+  rows.forEach((row, i) => {
+    const cj = row['Customer Journey Stage']
+    const stage = row['Stage']
+    const role = row['Role']
+    if (!cj || !stage || !role) return
+    const cjS = String(cj).trim()
+    const stS = String(stage).trim()
+    const rlS = String(role).trim()
+    if (!cjS || !stS || !rlS) return
+
+    const phaseHours = {
+      'Project Start M0': parseNum(row['Project Start M0']),
+      'Project Start M1': parseNum(row['Project Start M1']),
+      'Project Mid':      parseNum(row['Project Mid']),
+      'Project End M-1':  parseNum(row['Project End M-1']),
+      'Project End M0':   parseNum(row['Project End M0']),
+      'Project End M1':   parseNum(row['Project End M1']),
+      'Project End M1+':  parseNum(row['Project End M1+']),
+    }
+    const totalHours = Object.values(phaseHours).reduce((s, h) => s + (h || 0), 0)
+    if (totalHours === 0) return
+
+    results.push({
+      stage: cjS,          // customer journey stage label (Validate/Bond/...)
+      taskStage: stS,      // task-level stage name (e.g., Discovery and App Go-Live)
+      role: rlS,
+      phaseHours,
+      _rawIndex: i,
+    })
+  })
   return results
 }
 

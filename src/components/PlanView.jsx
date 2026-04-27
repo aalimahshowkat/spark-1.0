@@ -8,7 +8,7 @@
  *   - No "base vs override" language — just "current plan"
  */
 import React, { useCallback, useMemo, useState } from 'react'
-import { Card, CardHeader, CardBody, Pill } from './ui'
+import { Card, CardHeader, CardBody, Pill, Mono } from './ui'
 import ProjectListManagerModal from './ProjectListManagerModal'
 import OrgRosterModal from './OrgRosterModal'
 import * as XLSX from 'xlsx'
@@ -38,9 +38,18 @@ export default function PlanView({
   datasetMode,
   onUseBase,
   onPromoteOverrideToBase,
-  onClearBase,
   onUpdateBaseProjects,
   onUpdateBaseRoster,
+  onUpdateCapacityConfig,
+  onResetToBundledDefaultPlan,
+  onResetBaseToSourceWorkbook,
+  onRemoveUploadedWorkbook,
+  onClearUploadedPlanEdits,
+  onUpdateOverrideProjects,
+  onUpdateOverrideRoster,
+  engineIngest,
+  effectiveCapacityConfig,
+  onGoToCapacitySetup,
   hasOverride,
   uploadedFileName,
   onGoToOverview,
@@ -49,8 +58,12 @@ export default function PlanView({
   const [manageOpen, setManageOpen] = useState(false)
   const [rosterOpen, setRosterOpen] = useState(false)
   const [confirmRefresh, setConfirmRefresh] = useState(null) // { file } | null
+  const [clearOpen, setClearOpen] = useState(false)
+  const [clearMode, setClearMode] = useState('reset_changes') // reset_changes | remove_workbook | remove_both
 
   const hasPlan = !!(base?.ingest || hasOverride)
+  const hasUploadedWorkbook = datasetMode === 'override' && !!hasOverride
+  const isBundledDefault = !!(base?.isBundledDefault || (base?.audit || []).some(a => a?.action === 'base_seed_default_plan'))
   const showBaseBootLoading = !!(baseLoading && !hasPlan)
   const planName = datasetMode === 'base'
     ? (base?.sourceFileName || baseSummary?.fileName || 'Saved plan')
@@ -58,8 +71,173 @@ export default function PlanView({
   const planDate = base?.savedAt
     ? new Date(base.savedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
     : null
-  const projectCount = base?.ingest?.projects?.length || baseSummary?.totalProjects || 0
-  const roster = base?.ingest?.roster || []
+  const activeIngest = engineIngest?.projects ? engineIngest : base?.ingest
+  const projectCount = activeIngest?.projects?.length || baseSummary?.totalProjects || 0
+  const roster = activeIngest?.roster || []
+  const projects = activeIngest?.projects || []
+  const capacityConfig = effectiveCapacityConfig ?? (base?.capacityConfig || null)
+
+  const safeText = (s) => String(s || '').trim()
+  const sameName = (a, b) => safeText(a).toLowerCase() === safeText(b).toLowerCase()
+
+  const PROJECT_ASSIGN_FIELDS = ['assignedCSM', 'assignedPM', 'assignedSE', 'assignedAnalyst1', 'assignedAnalyst2']
+
+  const applyPersonRenameRemoveToProjects = (projects, { renamePairs = [], removedNames = [] }) => {
+    const ren = new Map()
+    for (const [from, to] of renamePairs) {
+      const f = safeText(from)
+      const t = safeText(to)
+      if (f && t && !sameName(f, t)) ren.set(f.toLowerCase(), t)
+    }
+    const removed = new Set((removedNames || []).map(n => safeText(n).toLowerCase()).filter(Boolean))
+
+    // If a roster entry is removed but project assignments use a longer variant
+    // (e.g. roster: "Aakash", project list: "Aakash Agarwal"), broaden the removal
+    // to include prefix matches.
+    if (removed.size) {
+      const current = new Set()
+      const list = Array.isArray(projects) ? projects : []
+      for (const p of list) {
+        for (const f of PROJECT_ASSIGN_FIELDS) {
+          const cur = safeText(p?.[f])
+          if (!cur) continue
+          current.add(cur.toLowerCase())
+        }
+      }
+      for (const rn of Array.from(removed)) {
+        if (!rn || rn.includes(' ')) continue
+        if (current.has(rn)) continue
+        const prefix = `${rn} `
+        const matches = Array.from(current).filter(x => x.startsWith(prefix))
+        for (const m of matches) removed.add(m)
+      }
+    }
+
+    // If a roster entry is renamed but project assignments use a longer variant,
+    // broaden the rename to include prefix matches too.
+    if (ren.size) {
+      const current = new Set()
+      const list = Array.isArray(projects) ? projects : []
+      for (const p of list) {
+        for (const f of PROJECT_ASSIGN_FIELDS) {
+          const cur = safeText(p?.[f])
+          if (!cur) continue
+          current.add(cur.toLowerCase())
+        }
+      }
+      for (const [fromLower, toName] of Array.from(ren.entries())) {
+        if (!fromLower || fromLower.includes(' ')) continue
+        if (current.has(fromLower)) continue
+        const prefix = `${fromLower} `
+        const matches = Array.from(current).filter(x => x.startsWith(prefix))
+        for (const m of matches) ren.set(m, toName)
+      }
+    }
+
+    let changed = false
+    const next = (Array.isArray(projects) ? projects : []).map(p => {
+      let rowChanged = false
+      const out = { ...(p || {}) }
+      for (const f of PROJECT_ASSIGN_FIELDS) {
+        const cur = safeText(out?.[f])
+        const key = cur.toLowerCase()
+        if (ren.has(key)) {
+          out[f] = ren.get(key)
+          rowChanged = true
+        }
+        if (removed.has(key) && safeText(out?.[f])) {
+          out[f] = 'Unassigned'
+          rowChanged = true
+        }
+      }
+      if (rowChanged) changed = true
+      return rowChanged ? out : p
+    })
+
+    return { projects: next, changed }
+  }
+
+  const migrateCapacityConfigForRosterChanges = (cfg, { renamePairs = [], removedNames = [] }) => {
+    const base = (cfg && typeof cfg === 'object') ? cfg : null
+    if (!base) return null
+
+    const rename = new Map()
+    for (const [from, to] of renamePairs) {
+      const f = safeText(from)
+      const t = safeText(to)
+      if (f && t && !sameName(f, t)) rename.set(f, t)
+    }
+    const removed = new Set((removedNames || []).map(n => safeText(n)).filter(Boolean))
+
+    let changed = false
+    const next = { ...base }
+
+    // allocationsByPerson (keyed by name)
+    if (next.allocationsByPerson && typeof next.allocationsByPerson === 'object') {
+      const m = { ...(next.allocationsByPerson || {}) }
+      for (const [from, to] of rename.entries()) {
+        if (m[from] !== undefined) {
+          if (m[to] === undefined) m[to] = m[from]
+          delete m[from]
+          changed = true
+        }
+      }
+      for (const n of removed.values()) {
+        if (m[n] !== undefined) {
+          delete m[n]
+          changed = true
+        }
+      }
+      next.allocationsByPerson = Object.keys(m).length ? m : undefined
+    }
+
+    // workingDays.personAdjustmentsByPerson (keyed by name)
+    if (next.workingDays && typeof next.workingDays === 'object') {
+      const wd = { ...(next.workingDays || {}) }
+      const map = { ...(wd.personAdjustmentsByPerson || {}) }
+      for (const [from, to] of rename.entries()) {
+        if (map[from] !== undefined) {
+          if (map[to] === undefined) map[to] = map[from]
+          delete map[from]
+          changed = true
+        }
+      }
+      for (const n of removed.values()) {
+        if (map[n] !== undefined) {
+          delete map[n]
+          changed = true
+        }
+      }
+      wd.personAdjustmentsByPerson = Object.keys(map).length ? map : undefined
+      next.workingDays = Object.keys(wd).length ? wd : undefined
+    }
+
+    // assignmentBackfills (fromPerson/toPerson are names)
+    if (next.assignmentBackfills && typeof next.assignmentBackfills === 'object') {
+      const ab = {}
+      for (const [projectId, byRole] of Object.entries(next.assignmentBackfills || {})) {
+        const outByRole = {}
+        for (const [role, arr] of Object.entries(byRole || {})) {
+          const list = (Array.isArray(arr) ? arr : []).map(it => {
+            const row = { ...(it || {}) }
+            if (rename.has(row.fromPerson)) { row.fromPerson = rename.get(row.fromPerson); changed = true }
+            if (rename.has(row.toPerson)) { row.toPerson = rename.get(row.toPerson); changed = true }
+            return row
+          }).filter(it => {
+            const fp = safeText(it?.fromPerson)
+            const tp = safeText(it?.toPerson)
+            if (removed.has(fp) || removed.has(tp)) { changed = true; return false }
+            return true
+          })
+          if (list.length) outByRole[role] = list
+        }
+        if (Object.keys(outByRole).length) ab[projectId] = outByRole
+      }
+      next.assignmentBackfills = Object.keys(ab).length ? ab : undefined
+    }
+
+    return changed ? next : base
+  }
 
   const templateWb = useMemo(() => {
     const wb = XLSX.utils.book_new()
@@ -311,6 +489,125 @@ export default function PlanView({
         </div>
       )}
 
+      {/* Clear plan (enterprise confirmation) */}
+      {clearOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 520,
+          background: 'rgba(0,0,0,0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24,
+        }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setClearOpen(false) }}
+        >
+          <div style={{
+            background: C.surface,
+            borderRadius: 12,
+            padding: 22,
+            width: 'min(92vw, 560px)',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+            border: `1px solid ${C.border}`,
+          }}>
+            <div style={{ fontWeight: 800, fontSize: 15, color: C.ink, marginBottom: 6 }}>
+              Clear plan
+            </div>
+            <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 14 }}>
+              {hasUploadedWorkbook
+                ? <>Choose what to remove from your <strong>uploaded workbook</strong> and your in‑session edits.</>
+                : (isBundledDefault
+                  ? <>Reset your edits back to the <strong>SPARK default plan</strong>. The default plan is never deleted.</>
+                  : <>Choose what to remove from your <strong>saved plan</strong>. The SPARK default plan is never deleted.</>
+                )
+              }
+            </div>
+
+            <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
+              {(!hasUploadedWorkbook && isBundledDefault) ? (
+                <label style={radioRow(true)}>
+                  <input type="radio" name="spark_clear_mode" checked readOnly />
+                  <div>
+                    <div style={{ fontWeight: 850, color: C.ink }}>Clear all changes (Plan + Advanced planning settings)</div>
+                    <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
+                      Resets roster/projects edits and Advanced planning settings back to the bundled default.
+                    </div>
+                  </div>
+                </label>
+              ) : (
+                <>
+                  {hasUploadedWorkbook && (
+                    <label style={radioRow(clearMode === 'remove_workbook')}>
+                      <input type="radio" name="spark_clear_mode" checked={clearMode === 'remove_workbook'} onChange={() => setClearMode('remove_workbook')} />
+                      <div>
+                        <div style={{ fontWeight: 850, color: C.ink }}>Remove the uploaded workbook only</div>
+                        <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
+                          Removes the uploaded Excel workbook and discards its in‑session edits. SPARK will fall back to the saved/default plan.
+                        </div>
+                      </div>
+                    </label>
+                  )}
+
+                  <label style={radioRow(clearMode === 'reset_changes')}>
+                    <input type="radio" name="spark_clear_mode" checked={clearMode === 'reset_changes'} onChange={() => setClearMode('reset_changes')} />
+                    <div>
+                      <div style={{ fontWeight: 850, color: C.ink }}>
+                        Remove only user‑applied changes (Plan + Advanced planning settings)
+                      </div>
+                      <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
+                        {hasUploadedWorkbook
+                          ? 'Keeps the uploaded workbook, clears your in‑session edits (projects/roster/settings).'
+                          : 'Resets project/roster edits and Advanced planning settings back to the uploaded workbook.'
+                        }
+                      </div>
+                    </div>
+                  </label>
+
+                  <label style={radioRow(clearMode === 'remove_both')}>
+                    <input type="radio" name="spark_clear_mode" checked={clearMode === 'remove_both'} onChange={() => setClearMode('remove_both')} />
+                    <div>
+                      <div style={{ fontWeight: 850, color: C.ink }}>Remove both workbook and all applied changes</div>
+                      <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
+                        Resets everything back to the bundled SPARK default plan.
+                      </div>
+                    </div>
+                  </label>
+                </>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={async () => {
+                  setClearOpen(false)
+                  // Flow A: no uploaded workbook (default plan)
+                  if (!hasUploadedWorkbook && isBundledDefault) {
+                    return await onResetToBundledDefaultPlan?.({ note: 'Clear Plan — reset changes to SPARK default plan' })
+                  }
+
+                  // Flow B: uploaded workbook active (override)
+                  if (hasUploadedWorkbook) {
+                    if (clearMode === 'remove_workbook') return await onRemoveUploadedWorkbook?.()
+                    if (clearMode === 'reset_changes') return await onClearUploadedPlanEdits?.()
+                    if (clearMode === 'remove_both') {
+                      await onRemoveUploadedWorkbook?.()
+                      return await onClearUploadedPlanEdits?.()
+                    }
+                    return
+                  }
+
+                  // Flow C: saved (non-default) plan active
+                  if (clearMode === 'remove_workbook') return await onResetToBundledDefaultPlan?.({ note: 'Clear Plan — removed uploaded plan workbook' })
+                  if (clearMode === 'reset_changes') return await onResetBaseToSourceWorkbook?.({ note: 'Clear Plan — reset changes to uploaded workbook' })
+                  if (clearMode === 'remove_both') return await onResetToBundledDefaultPlan?.({ note: 'Clear Plan — removed workbook and all changes (back to default)' })
+                }}
+                style={primaryBtn}
+              >
+                Confirm
+              </button>
+              <button onClick={() => setClearOpen(false)} style={ghostBtn}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontWeight: 700, fontSize: 22, color: C.ink, letterSpacing: '-0.03em', marginBottom: 4 }}>
@@ -359,19 +656,24 @@ export default function PlanView({
                     Go to Overview →
                   </button>
                 )}
-                {base?.ingest && (
+                {activeIngest && (
                   <button onClick={() => setManageOpen(true)} style={ghostBtn}>
                     Edit projects
                   </button>
                 )}
-                {base?.ingest && (
+                {activeIngest && (
                   <button onClick={() => setRosterOpen(true)} style={ghostBtn}>
                     Manage roster
                   </button>
                 )}
-                {base?.ingest && (
+                {hasPlan && typeof onGoToCapacitySetup === 'function' && (
+                  <button onClick={onGoToCapacitySetup} style={advancedBtn}>
+                    Advanced planning
+                  </button>
+                )}
+                {hasPlan && (
                   <button
-                    onClick={onClearBase}
+                    onClick={() => setClearOpen(true)}
                     style={{ ...ghostBtn, color: C.red, borderColor: 'rgba(248,113,113,0.4)' }}
                   >
                     Clear plan
@@ -443,6 +745,18 @@ export default function PlanView({
           </button>
         </div>
       )}
+
+      <Card style={{ marginBottom: 16 }}>
+        <CardHeader title="Updating the SPARK default plan" />
+        <CardBody>
+          <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.7 }}>
+            To update <strong>your</strong> plan, either upload a new workbook (and click <strong>Save as plan</strong>) or use <strong>Edit projects</strong> / <strong>Manage roster</strong> on this page.
+            <div style={{ marginTop: 8 }}>
+              If you need to change the <strong>global bundled default workbook</strong> (what first‑time users see), that’s an admin action — contact the <strong>AiDash PMO Team</strong>.
+            </div>
+          </div>
+        </CardBody>
+      </Card>
 
       {/* Upload drop zone */}
       <label
@@ -518,7 +832,6 @@ export default function PlanView({
               {[
                 ['Project List', 'Project metadata, dates, VIBE type, orbit, and scale', 'Yes'],
                 ['Demand Base Matrix', 'Base hours by role × VIBE × phase — drives all demand calculations', 'Yes'],
-                ['Capacity Model', 'Used only for parity validation during transition', 'No'],
               ].map(([sheet, purpose, req], i) => (
                 <tr key={sheet} style={{ background: i % 2 ? C.surface1 : C.surface }}>
                   <td style={{ padding: '9px 14px', fontFamily: 'var(--font-mono)', fontSize: 11.5, fontWeight: 500, color: C.ink, borderBottom: `1px solid ${C.border}` }}>{sheet}</td>
@@ -536,11 +849,15 @@ export default function PlanView({
       <ProjectListManagerModal
         isOpen={manageOpen}
         onClose={() => setManageOpen(false)}
-        projects={base?.ingest?.projects || []}
+        projects={projects}
         roster={roster}
         baseLabel={planName}
         onSaveProjects={async ({ projects, editorName, note }) => {
-          await onUpdateBaseProjects?.({ projects, editorName, note })
+          if (datasetMode === 'base') {
+            await onUpdateBaseProjects?.({ projects, editorName, note })
+          } else {
+            await onUpdateOverrideProjects?.({ projects, editorName, note })
+          }
         }}
       />
 
@@ -559,7 +876,7 @@ export default function PlanView({
             if (byId.has(id)) return
             byId.set(id, { id, name: n, role, fte: 1 })
           }
-          for (const p of (base?.ingest?.projects || [])) {
+          for (const p of (projects || [])) {
             add('CSM', p.assignedCSM)
             add('PM', p.assignedPM)
             add('SE', p.assignedSE)
@@ -569,7 +886,60 @@ export default function PlanView({
           return [...byId.values()].sort((a, b) => (a.role + a.name).localeCompare(b.role + b.name))
         }}
         onSaveRoster={async ({ roster, editorName, note }) => {
-          await onUpdateBaseRoster?.({ roster, editorName, note })
+          const prevRoster = Array.isArray(activeIngest?.roster) ? activeIngest.roster : []
+          const prevById = new Map((prevRoster || []).map((p) => [String(p?.id || ''), p]).filter(([id]) => id))
+          const nextById = new Map((roster || []).map((p) => [String(p?.id || ''), p]).filter(([id]) => id))
+
+          const renamePairs = []
+          const removedNames = []
+
+          for (const [id, prev] of prevById.entries()) {
+            const next = nextById.get(id)
+            if (!next) {
+              if (safeText(prev?.name)) removedNames.push(prev.name)
+              continue
+            }
+            const pn = safeText(prev?.name)
+            const nn = safeText(next?.name)
+            if (pn && nn && !sameName(pn, nn)) renamePairs.push([pn, nn])
+          }
+
+          const prevProjects = Array.isArray(activeIngest?.projects) ? activeIngest.projects : []
+          const { projects: nextProjects, changed: projectsChanged } =
+            applyPersonRenameRemoveToProjects(prevProjects, { renamePairs, removedNames })
+
+          if (projectsChanged) {
+            const renameNote = renamePairs.length ? `Renamed: ${renamePairs.map(([f, t]) => `${f} → ${t}`).join(', ')}` : ''
+            const removeNote = removedNames.length ? `Removed: ${removedNames.join(', ')}` : ''
+            const extra = [renameNote, removeNote].filter(Boolean).join(' · ')
+            const payload = {
+              projects: nextProjects,
+              editorName,
+              note: extra ? `Roster change — updated project assignments. ${extra}` : 'Roster change — updated project assignments.',
+            }
+            if (datasetMode === 'base') await onUpdateBaseProjects?.(payload)
+            else await onUpdateOverrideProjects?.(payload)
+          }
+
+          // Migrate capacity config name-keyed fields so allocations/working-days/backfills remain connected.
+          if (capacityConfig && (renamePairs.length || removedNames.length)) {
+            const nextCfg = migrateCapacityConfigForRosterChanges(capacityConfig, { renamePairs, removedNames })
+            if (nextCfg !== capacityConfig) {
+              const renameNote = renamePairs.length ? `Renamed: ${renamePairs.map(([f, t]) => `${f} → ${t}`).join(', ')}` : ''
+              const removeNote = removedNames.length ? `Removed: ${removedNames.join(', ')}` : ''
+              const extra = [renameNote, removeNote].filter(Boolean).join(' · ')
+              await onUpdateCapacityConfig?.({
+                capacityConfig: nextCfg,
+                note: extra ? `Roster change — migrated capacity settings. ${extra}` : 'Roster change — migrated capacity settings.',
+              })
+            }
+          }
+
+          if (datasetMode === 'base') {
+            await onUpdateBaseRoster?.({ roster, editorName, note })
+          } else {
+            await onUpdateOverrideRoster?.({ roster, editorName, note })
+          }
         }}
       />
 
@@ -620,4 +990,26 @@ const ghostBtn = {
   padding: '7px 14px', background: 'transparent', color: 'var(--ink)',
   border: '1px solid var(--border)', borderRadius: 6, fontSize: 12.5, fontWeight: 500,
   cursor: 'pointer', fontFamily: 'var(--font-sans)',
+}
+
+const advancedBtn = {
+  ...ghostBtn,
+  background: 'linear-gradient(90deg, rgba(124,58,237,0.12), rgba(37,99,235,0.10))',
+  borderColor: 'rgba(124,58,237,0.35)',
+  color: '#312e81',
+  fontWeight: 800,
+}
+
+function radioRow(active) {
+  return {
+    display: 'grid',
+    gridTemplateColumns: '18px 1fr',
+    gap: 10,
+    alignItems: 'start',
+    padding: 12,
+    borderRadius: 10,
+    border: `1px solid ${active ? 'rgba(124,58,237,0.35)' : 'var(--border)'}`,
+    background: active ? 'rgba(124,58,237,0.06)' : 'white',
+    cursor: 'pointer',
+  }
 }

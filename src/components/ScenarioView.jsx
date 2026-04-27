@@ -21,6 +21,7 @@ import { runCalculations } from '../engine/calculate.js'
 import { Card, CardHeader, CardBody, Tag, Pill, AlertBar, KpiStrip, KpiCard } from './ui.jsx'
 import { CHART_COLORS } from '../lib/chartSetup.js'
 import NumericField from './NumericField.jsx'
+import { computeRosterWorkingDaysByMonth } from '../engine/workingDays.js'
 
 // ─── Palette shortcuts ─────────────────────────────────────────────────────
 const C = {
@@ -37,7 +38,7 @@ const C = {
   sidebar: 'var(--sidebar-bg)',
 }
 
-const PMO_WARN_NAME = 'Aalimah Showkat'
+const PMO_WARN_NAME = 'Aalimah Showkat' // retained for backwards compatibility (no warning UI)
 
 function fmtUpdatedAt(value) {
   try {
@@ -55,6 +56,7 @@ export default function ScenarioView({ uploadedFile, baselineCalc, baselineData 
 
   const hasFile = !!uploadedFile
   const planningYear = baselineCalc?.meta?.planningYear || 2026
+  const baselineCapacityConfig = uploadedFile?.capacityConfig || null
 
   return (
     <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', minHeight: 600 }}>
@@ -66,9 +68,17 @@ export default function ScenarioView({ uploadedFile, baselineCalc, baselineData 
       <div style={{ flex: 1, minWidth: 0 }}>
         {!hasFile && <NoFilePrompt />}
         {hasFile && panel === 'list' && !activeScenario && <StartPrompt onNew={(opts) => sc.newScenario(opts)} />}
-        {hasFile && panel === 'list' && activeScenario  && <ComparePanel sc={sc} baselineCalc={baselineCalc} />}
-        {hasFile && panel === 'edit' && editDraft        && <EditPanel sc={sc} baselineIngest={sc.baselineIngest} baselineCalc={baselineCalc} planningYear={planningYear} />}
-        {hasFile && panel === 'compare' && activeScenario && <ComparePanel sc={sc} baselineCalc={baselineCalc} />}
+        {hasFile && panel === 'list' && activeScenario  && <ComparePanel sc={sc} baselineCalc={baselineCalc} baselineCapacityConfig={baselineCapacityConfig} />}
+        {hasFile && panel === 'edit' && editDraft        && (
+          <EditPanel
+            sc={sc}
+            baselineIngest={sc.baselineIngest}
+            baselineCalc={baselineCalc}
+            planningYear={planningYear}
+            baselineCapacityConfig={baselineCapacityConfig}
+          />
+        )}
+        {hasFile && panel === 'compare' && activeScenario && <ComparePanel sc={sc} baselineCalc={baselineCalc} baselineCapacityConfig={baselineCapacityConfig} />}
       </div>
     </div>
   )
@@ -177,7 +187,7 @@ const EDIT_TABS = [
   { id: 'assumptions', label: 'Assumptions' },
 ]
 
-function EditPanel({ sc, baselineIngest, baselineCalc, planningYear = 2026 }) {
+function EditPanel({ sc, baselineIngest, baselineCalc, planningYear = 2026, baselineCapacityConfig = null }) {
   const [tab, setTab] = useState('projects')
   const { editDraft, saveEditDraft, discardEditDraft,
           patchDraftProject, removeDraftProject,
@@ -291,6 +301,7 @@ function EditPanel({ sc, baselineIngest, baselineCalc, planningYear = 2026 }) {
           onRemoveAddedProject={removeScenarioProject}
           baselineIngest={baselineIngest}
           baselineCalc={baselineCalc}
+          baselineCapacityConfig={baselineCapacityConfig}
           planningYear={planningYear}
           roster={baselineIngest?.roster || []}
         />
@@ -300,6 +311,7 @@ function EditPanel({ sc, baselineIngest, baselineCalc, planningYear = 2026 }) {
           overrides={editDraft.resourceOverrides}
           onPatch={patchDraftResource}
           baselineIngest={baselineIngest}
+          baselineCapacityConfig={baselineCapacityConfig}
           planningYear={planningYear}
         />
       )}
@@ -316,6 +328,7 @@ function EditPanel({ sc, baselineIngest, baselineCalc, planningYear = 2026 }) {
           overrides={editDraft.assumptionOverrides}
           onPatch={patchDraftAssumptions}
           baselineIngest={baselineIngest}
+          baselineCapacityConfig={baselineCapacityConfig}
           planningYear={planningYear}
         />
       )}
@@ -356,6 +369,7 @@ function ProjectOverridesTab({
   onRemoveAddedProject,
   baselineIngest,
   baselineCalc,
+  baselineCapacityConfig,
   planningYear = 2026,
   roster = [],
 }) {
@@ -454,6 +468,7 @@ function ProjectOverridesTab({
           rosterByRole={rosterByRole}
           baselineIngest={baselineIngest}
           baselineCalc={baselineCalc}
+          baselineCapacityConfig={baselineCapacityConfig}
           onClose={() => setShowAddModal(false)}
           onAdd={(proj) => { onAddProject?.(proj); setShowAddModal(false) }}
         />
@@ -467,7 +482,7 @@ function ProjectOverridesTab({
         <input
           value={search}
           onChange={e => setSearch(e.target.value)}
-          placeholder="Search projects\u2026"
+          placeholder="Search projects…"
           style={inputStyle({ width: 220 })}
         />
         <button
@@ -541,7 +556,7 @@ function ProjectOverridesTab({
   )
 }
 
-function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, baselineIngest, baselineCalc, onClose, onAdd }) {
+function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, baselineIngest, baselineCalc, baselineCapacityConfig, onClose, onAdd }) {
   const [name, setName] = useState('')
   const [vibeType, setVibeType] = useState(VIBE_TYPES?.[0] || 'Bond')
   const [startMonth, setStartMonth] = useState(0)
@@ -553,8 +568,6 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
   const [assignedPM, setAssignedPM] = useState('')
   const [assignedAnalyst1, setAssignedAnalyst1] = useState('')
   const [assignedAnalyst2, setAssignedAnalyst2] = useState('')
-  const [pmoAck, setPmoAck] = useState({ CSM: false, PM: false, A1: false, A2: false })
-  const [pmoWarn, setPmoWarn] = useState({ CSM: false, PM: false, A1: false, A2: false })
   const [recNote, setRecNote] = useState('')
   const [recBusy, setRecBusy] = useState(false)
   const [recDetails, setRecDetails] = useState(null) // { CSM:[{name,overflow,util}], PM:..., A1:..., A2:... }
@@ -573,11 +586,6 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
   const canSave = String(name || '').trim().length > 0
 
   const normName = useCallback((s) => String(s || '').trim(), [])
-  const maybeWarnPmo = useCallback((key, nameValue) => {
-    const n = normName(nameValue)
-    if (n !== PMO_WARN_NAME) return
-    setPmoWarn(prev => (prev?.[key] ? prev : { ...prev, [key]: true }))
-  }, [normName])
 
   const suggestStaffing = useCallback(async () => {
     setRecBusy(true)
@@ -638,11 +646,49 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
         byRole[row.role][mi] += Number(row.finalHours || 0)
       }
 
-      const baseConfig = buildScenarioCapacityConfig({ roster: ingest.roster || [], planningYear })
-      const baseCap = computeCapacityScenario(baseConfig)
-      const capSeries = (role) => {
+      const roleMonthArr = (role) => {
         const key = role === 'Analyst 2' ? 'Analyst 1' : role === 'Analyst 1' ? 'Analyst 1' : role
-        return baseCap?.[key]?.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+        const cfg = buildScenarioCapacityConfig({ roster: ingest.roster || [], planningYear, baselineCapacityConfig: baselineCapacityConfig || null })
+        return (cfg?.hrsPerPersonMonthByMonthByRole && cfg.hrsPerPersonMonthByMonthByRole[key]) || cfg?.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+      }
+
+      const rosterPeople = (() => {
+        const map = new Map() // name -> { fte, baseRole }
+        for (const p of (ingest.roster || [])) {
+          const name = String(p?.name || '').trim()
+          if (!name) continue
+          const roleRaw = String(p?.role || '').trim()
+          const baseRole = roleRaw === 'Analyst' ? 'Analyst 1' : roleRaw
+          const f = Number(p?.fte)
+          if (!Number.isFinite(f) || f <= 0) continue
+          const prev = map.get(name)
+          if (!prev) map.set(name, { fte: f, baseRole })
+          else map.set(name, { fte: Math.max(prev.fte || 0, f), baseRole: prev.baseRole || baseRole })
+        }
+        return map
+      })()
+
+      const allocByPerson = baselineCapacityConfig?.allocationsByPerson || null
+      const hasAnyAlloc = !!(allocByPerson && typeof allocByPerson === 'object' && Object.keys(allocByPerson).length > 0)
+      const DEFAULT_HALF_TIME_NAME = 'Aalimah Showkat'
+      const isDefaultHalfTime = (name) => String(name || '').trim().toLowerCase() === DEFAULT_HALF_TIME_NAME.toLowerCase()
+      const pctFor = (name, roleKey) => {
+        const targetRole = roleKey === 'Analyst 2' ? 'Analyst 1' : roleKey
+        const rec = allocByPerson?.[name]
+        if (rec && typeof rec === 'object') {
+          const n = Number(rec?.roles?.[targetRole])
+          return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+        }
+        if (isDefaultHalfTime(name)) {
+          const baseRole = rosterPeople.get(name)?.baseRole
+          return baseRole === targetRole ? 50 : 0
+        }
+        if (!hasAnyAlloc) {
+          const baseRole = rosterPeople.get(name)?.baseRole
+          return baseRole === targetRole ? 100 : 0
+        }
+        const baseRole = rosterPeople.get(name)?.baseRole
+        return baseRole === targetRole ? 100 : 0
       }
 
       const personMonthlyByRole = (() => {
@@ -661,14 +707,17 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
       const scoreCandidate = (role, personName) => {
         const baseArr = personMonthlyByRole[role]?.get(personName) || new Array(12).fill(0)
         const addArr = byRole[role] || new Array(12).fill(0)
-        const capArr = capSeries(role)
+        const capBaseArr = roleMonthArr(role)
+        const fte = rosterPeople.get(personName)?.fte || 0
+        const pctAlloc = pctFor(personName, role)
+        const capArr = capBaseArr.map(h => (Number(h) || 0) * fte * (pctAlloc / 100))
         let overflow = 0
         let utilNum = 0
         let utilDen = 0
         for (let i = 0; i < 12; i++) {
           if ((addArr[i] || 0) <= 0) continue
           const newLoad = (baseArr[i] || 0) + (addArr[i] || 0)
-          const cap = capArr[i] || HRS_PER_PERSON_MONTH
+          const cap = capArr[i] || 0
           overflow += Math.max(0, newLoad - cap)
           utilNum += newLoad
           utilDen += cap
@@ -720,12 +769,6 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
       if (recA1) setAssignedAnalyst1(recA1)
       if (recA2) setAssignedAnalyst2(recA2)
 
-      // If a recommendation selects Aalimah, warn inline (do not block).
-      if (!pmoAck?.CSM) maybeWarnPmo('CSM', recCsm)
-      if (!pmoAck?.PM)  maybeWarnPmo('PM', recPm)
-      if (!pmoAck?.A1)  maybeWarnPmo('A1', recA1)
-      if (!pmoAck?.A2)  maybeWarnPmo('A2', recA2)
-
       setLastPick({ CSM: recCsm, PM: recPm, A1: recA1, A2: recA2 })
 
       setRecDetails({
@@ -739,7 +782,7 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
     } finally {
       setRecBusy(false)
     }
-  }, [baselineIngest, baselineCalc, startMonth, deliveryMonth, planningYear, name, vibeType, orbit, totalLMs, analystUtilPct, deriveLm, rosterByRole, maybeWarnPmo, pmoAck])
+  }, [baselineIngest, baselineCalc, baselineCapacityConfig, startMonth, deliveryMonth, planningYear, name, vibeType, orbit, totalLMs, analystUtilPct, deriveLm, rosterByRole])
 
   const handleAdd = () => {
     if (!canSave) return
@@ -894,18 +937,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
                 onChange={(e) => {
                   const v = e.target.value
                   setAssignedCSM(v)
-                  if (!pmoAck?.CSM) maybeWarnPmo('CSM', v)
                 }}
                 placeholder="Pick or type"
                 style={inputStyle()}
               />
-              {pmoWarn?.CSM && normName(assignedCSM) === PMO_WARN_NAME && (
-                <InlineWarn
-                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
-                  onProceed={() => { setPmoAck(prev => ({ ...prev, CSM: true })); setPmoWarn(prev => ({ ...prev, CSM: false })) }}
-                  onChooseElse={() => { setAssignedCSM(''); setPmoWarn(prev => ({ ...prev, CSM: false })) }}
-                />
-              )}
               <datalist id="sc_add_csm">{(rosterByRole?.CSM || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
             <FieldGroup label="PM">
@@ -915,18 +950,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
                 onChange={(e) => {
                   const v = e.target.value
                   setAssignedPM(v)
-                  if (!pmoAck?.PM) maybeWarnPmo('PM', v)
                 }}
                 placeholder="Pick or type"
                 style={inputStyle()}
               />
-              {pmoWarn?.PM && normName(assignedPM) === PMO_WARN_NAME && (
-                <InlineWarn
-                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
-                  onProceed={() => { setPmoAck(prev => ({ ...prev, PM: true })); setPmoWarn(prev => ({ ...prev, PM: false })) }}
-                  onChooseElse={() => { setAssignedPM(''); setPmoWarn(prev => ({ ...prev, PM: false })) }}
-                />
-              )}
               <datalist id="sc_add_pm">{(rosterByRole?.PM || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
             <FieldGroup label="Analyst 1">
@@ -936,18 +963,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
                 onChange={(e) => {
                   const v = e.target.value
                   setAssignedAnalyst1(v)
-                  if (!pmoAck?.A1) maybeWarnPmo('A1', v)
                 }}
                 placeholder="Pick or type"
                 style={inputStyle()}
               />
-              {pmoWarn?.A1 && normName(assignedAnalyst1) === PMO_WARN_NAME && (
-                <InlineWarn
-                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
-                  onProceed={() => { setPmoAck(prev => ({ ...prev, A1: true })); setPmoWarn(prev => ({ ...prev, A1: false })) }}
-                  onChooseElse={() => { setAssignedAnalyst1(''); setPmoWarn(prev => ({ ...prev, A1: false })) }}
-                />
-              )}
               <datalist id="sc_add_a1">{(rosterByRole?.['Analyst 1'] || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
             <FieldGroup label="Analyst 2">
@@ -957,18 +976,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
                 onChange={(e) => {
                   const v = e.target.value
                   setAssignedAnalyst2(v)
-                  if (!pmoAck?.A2) maybeWarnPmo('A2', v)
                 }}
                 placeholder="Pick or type"
                 style={inputStyle()}
               />
-              {pmoWarn?.A2 && normName(assignedAnalyst2) === PMO_WARN_NAME && (
-                <InlineWarn
-                  text="Utilization in PMO as well. Bandwidth may be split across departments. Continue?"
-                  onProceed={() => { setPmoAck(prev => ({ ...prev, A2: true })); setPmoWarn(prev => ({ ...prev, A2: false })) }}
-                  onChooseElse={() => { setAssignedAnalyst2(''); setPmoWarn(prev => ({ ...prev, A2: false })) }}
-                />
-              )}
               <datalist id="sc_add_a2">{(rosterByRole?.['Analyst 2'] || rosterByRole?.['Analyst 1'] || []).map(n => <option key={n} value={n} />)}</datalist>
             </FieldGroup>
           </div>
@@ -1200,13 +1211,13 @@ const ProjectOverrideRow = React.memo(function ProjectOverrideRow({
 // RESOURCE OVERRIDES TAB
 // ─────────────────────────────────────────────────────────────────────────
 
-function ResourceOverridesTab({ overrides, onPatch, baselineIngest, planningYear = 2026 }) {
+function ResourceOverridesTab({ overrides, onPatch, baselineIngest, baselineCapacityConfig, planningYear = 2026 }) {
   // Analyst is a single override role in the Scenario layer.
   // Internally, capacity is driven by `Analyst 1` headcount.
   const roles = ['CSM', 'PM', 'Analyst']
   const baselineCfg = useMemo(
-    () => buildScenarioCapacityConfig({ roster: baselineIngest?.roster || [], planningYear }),
-    [baselineIngest, planningYear]
+    () => buildScenarioCapacityConfig({ roster: baselineIngest?.roster || [], planningYear, baselineCapacityConfig }),
+    [baselineIngest, planningYear, baselineCapacityConfig]
   )
   const avgHrsPerPersonMo = useMemo(() => {
     const arr = baselineCfg?.hrsPerPersonMonthByMonth
@@ -1280,10 +1291,10 @@ function ResourceOverridesTab({ overrides, onPatch, baselineIngest, planningYear
 // ASSUMPTION OVERRIDES TAB
 // ─────────────────────────────────────────────────────────────────────────
 
-function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYear = 2026 }) {
+function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, baselineCapacityConfig, planningYear = 2026 }) {
   const baselineCfg = useMemo(
-    () => buildScenarioCapacityConfig({ roster: baselineIngest?.roster || [], planningYear }),
-    [baselineIngest, planningYear]
+    () => buildScenarioCapacityConfig({ roster: baselineIngest?.roster || [], planningYear, baselineCapacityConfig }),
+    [baselineIngest, planningYear, baselineCapacityConfig]
   )
   const baselineAvgHrsPerPersonMo = useMemo(() => {
     const arr = baselineCfg?.hrsPerPersonMonthByMonth
@@ -1346,6 +1357,128 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
     return getOrbitBaselineVal(vibe, orbit)
   }
 
+  const wdPeople = useMemo(() => {
+    const map = overrides?.workingDaysDelta?.personAdjustmentsByPerson || {}
+    const set = new Set()
+    for (const k of Object.keys(map || {})) {
+      const n = String(k || '').trim()
+      if (n) set.add(n)
+    }
+    return [...set.values()].sort((a, b) => a.localeCompare(b))
+  }, [overrides?.workingDaysDelta])
+
+  const [lastWdAdd, setLastWdAdd] = useState(null) // { person, startDate, endDate, kind }
+
+  // Lightweight slack suggestions for editor defaults (uses baseline ingest + assumption overrides only).
+  const previewCfg = useMemo(() => {
+    return buildScenarioCapacityConfig({
+      roster: baselineIngest?.roster || [],
+      planningYear,
+      assumptionOverrides: overrides || {},
+      baselineCapacityConfig: baselineCapacityConfig || null,
+    })
+  }, [baselineIngest, planningYear, overrides, baselineCapacityConfig])
+
+  const previewCalc = useMemo(() => {
+    if (!baselineIngest?.projects || !baselineIngest?.demandMatrix) return null
+    try {
+      const orbitMerged = {
+        ...(baselineIngest?.orbitMultipliers || {}),
+        ...(previewCfg?.orbitVibeMultipliers || {}),
+      }
+      return runCalculations(
+        baselineIngest.projects,
+        baselineIngest.demandMatrix,
+        orbitMerged,
+        planningYear,
+        { roster: baselineIngest?.roster || [], capacityConfig: previewCfg || null, demandTasks: baselineIngest?.demandTasks || null }
+      )
+    } catch {
+      return null
+    }
+  }, [baselineIngest, previewCfg, planningYear])
+
+  const suggestSlackFor = useCallback((roleRaw, startDateIso, topN = 5, exclude = []) => {
+    const mi = (() => {
+      const s = String(startDateIso || '').trim()
+      if (!s) return null
+      const d = new Date(`${s}T00:00:00Z`)
+      const m = d.getUTCMonth()
+      return Number.isFinite(m) ? m : null
+    })()
+    if (mi === null) return []
+    const role = (roleRaw === 'Analyst 2') ? 'Analyst 1' : roleRaw
+    const cfg = previewCfg
+    const calc = previewCalc
+    if (!cfg || !calc) return []
+
+    const businessDaysByMonth = cfg.businessDaysByMonth || new Array(12).fill(0)
+    const baseDays = Number(businessDaysByMonth?.[mi] || 0)
+    if (!(baseDays > 0)) return []
+
+    const roster = cfg.roster || baselineIngest?.roster || []
+    const rosterDays = computeRosterWorkingDaysByMonth({
+      year: cfg.planningYear || planningYear,
+      baseBusinessDaysByMonth: businessDaysByMonth,
+      roster,
+      workingDays: cfg.workingDays || null,
+    })
+
+    const byRole = cfg.hrsPerPersonMonthByMonthByRole || {}
+    const baseMonthHoursArr = byRole?.[role] || cfg.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+
+    const alloc = cfg.allocationsByPerson || null
+    const DEFAULT_HALF_TIME_NAME = 'Aalimah Showkat'
+    const isDefaultHalfTime = (name) => String(name || '').trim().toLowerCase() === DEFAULT_HALF_TIME_NAME.toLowerCase()
+    const rosterBaseRoleByName = new Map()
+    const rosterFteByName = new Map()
+    for (const p of Array.isArray(roster) ? roster : []) {
+      const n = String(p?.name || '').trim()
+      if (!n) continue
+      const rr = String(p?.role || '').trim()
+      const baseRole = rr === 'Analyst' ? 'Analyst 1' : rr
+      const f = Number(p?.fte)
+      if (Number.isFinite(f) && f > 0) rosterFteByName.set(n, Math.max(rosterFteByName.get(n) || 0, f))
+      if (!rosterBaseRoleByName.has(n) && baseRole) rosterBaseRoleByName.set(n, baseRole)
+    }
+    const pctFor = (name) => {
+      const rec = alloc?.[name]
+      if (rec && typeof rec === 'object') {
+        const v = rec?.roles?.[role]
+        const n = Number(v)
+        return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+      }
+      if (isDefaultHalfTime(name)) return rosterBaseRoleByName.get(name) === role ? 50 : 0
+      return rosterBaseRoleByName.get(name) === role ? 100 : 0
+    }
+    const dp = calc.demandByPerson || {}
+    const demandFor = (name) => {
+      const rec = dp[`${role}__${name}`]
+      return Number(rec?.monthly?.[mi] || 0)
+    }
+
+    const ex = new Set((exclude || []).map(x => String(x || '').trim()).filter(Boolean))
+    const ranked = []
+    for (const name of rosterFteByName.keys()) {
+      if (ex.has(name)) continue
+      const fte = rosterFteByName.get(name) || 0
+      if (!(fte > 0)) continue
+      const pct = pctFor(name)
+      if (!(pct > 0)) continue
+      const personDays = rosterDays?.[name]?.daysByMonth || businessDaysByMonth
+      const days = Number(personDays?.[mi] || 0)
+      if (!(days > 0)) continue
+      const perFte = (Number(baseMonthHoursArr?.[mi]) || 0) * (days / baseDays)
+      const cap = perFte * fte * (pct / 100)
+      const demand = demandFor(name)
+      const slack = cap - demand
+      if (slack <= 0) continue
+      ranked.push({ name, slack })
+    }
+    ranked.sort((a, b) => (b.slack || 0) - (a.slack || 0))
+    return ranked.slice(0, topN)
+  }, [previewCfg, previewCalc, baselineIngest, planningYear])
+
   return (
     <div>
       <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14, lineHeight: 1.6 }}>
@@ -1401,11 +1534,16 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
       </div>
 
       {/* Per-role working hours overrides */}
-      <Card style={{ marginTop: 14 }}>
-        <CardHeader title="Working hours per person per business day (by role)">
-          <Tag>Capacity only</Tag>
-        </CardHeader>
-        <CardBody>
+      <details style={{ marginTop: 14 }} open={false}>
+        <summary style={{ listStyle: 'none', cursor: 'pointer' }}>
+          <Card>
+            <CardHeader title="Working hours per person per business day (by role)">
+              <Tag>Capacity only</Tag>
+            </CardHeader>
+          </Card>
+        </summary>
+        <Card style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, borderTop: 'none' }}>
+          <CardBody>
           <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
             Optional. Set role-specific hours/day. These <strong>override</strong> the global hours/day setting above for that role.
           </div>
@@ -1455,15 +1593,97 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
               </div>
             )
           })}
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </details>
+
+      {/* Availability & coverage (scenario-only) */}
+      <details style={{ marginTop: 14 }} open={false}>
+        <summary style={{ listStyle: 'none', cursor: 'pointer' }}>
+          <Card>
+            <CardHeader title="Availability & coverage (scenario-only)">
+              <Tag>PTO + backfill</Tag>
+            </CardHeader>
+          </Card>
+        </summary>
+        <Card style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, borderTop: 'none' }}>
+          <CardBody>
+            <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+              Add PTO / non-project work / weekend work, then backfill the resulting gaps. Both save into the scenario and appear in Compare → Impact summary.
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 8 }}>
+                1) Working days adjustments
+              </div>
+              <WorkingDaysDeltaEditor
+                planningYear={planningYear}
+                roster={baselineIngest?.roster || []}
+                value={overrides?.workingDaysDelta || null}
+                onChange={(next) => onPatch({ workingDaysDelta: next || undefined })}
+                onAfterAdd={(info) => setLastWdAdd(info)}
+              />
+            </div>
+
+            <div style={{ marginTop: 12, borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 8 }}>
+                2) Backfills / reassignment
+              </div>
+              <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.6, marginBottom: 10 }}>
+                After adding PTO for a person, use this to reassign work from Unassigned to someone on the roster (or shift between people).
+              </div>
+              <AssignmentBackfillsDeltaEditor
+                planningYear={planningYear}
+                projects={baselineIngest?.projects || []}
+                roster={baselineIngest?.roster || []}
+                focusPeople={wdPeople}
+                initialFocusPerson={lastWdAdd?.person || ''}
+                initialStartDate={lastWdAdd?.startDate || ''}
+                initialEndDate={lastWdAdd?.endDate || ''}
+                suggestSlackFor={suggestSlackFor}
+                value={overrides?.assignmentBackfillsDelta || null}
+                onChange={(next) => onPatch({ assignmentBackfillsDelta: next || undefined })}
+              />
+            </div>
+          </CardBody>
+        </Card>
+      </details>
+
+      {/* PM multipliers (task table; scenario-only) */}
+      <details style={{ marginTop: 14 }} open={false}>
+        <summary style={{ listStyle: 'none', cursor: 'pointer' }}>
+          <Card>
+            <CardHeader title="PM multipliers (scenario-only)">
+              <Tag>PM demand drivers</Tag>
+            </CardHeader>
+          </Card>
+        </summary>
+        <Card style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, borderTop: 'none' }}>
+          <CardBody>
+            <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
+              Edit the workbook’s <strong>task-level PM table</strong> (Customer journey stage → Stage → PM → phase hours) for this scenario only.
+              Changes are aggregated into PM base-hours and applied to all projects by their <strong>VIBE tag</strong>, then recalculated through utilization/risks.
+            </div>
+            <PmTaskMultipliersEditor
+              baselineTasks={baselineIngest?.demandTasks || []}
+              value={overrides?.pmTaskMultipliers || null}
+              onChange={(next) => onPatch({ pmTaskMultipliers: next || undefined })}
+            />
+          </CardBody>
+        </Card>
+      </details>
 
       {/* LM Bucket multipliers */}
-      <Card style={{ marginTop: 14 }}>
-        <CardHeader title="LM Bucket multipliers (scenario-only)">
-          <Tag>Impacts demand hours</Tag>
-        </CardHeader>
-        <CardBody>
+      <details style={{ marginTop: 14 }} open={false}>
+        <summary style={{ listStyle: 'none', cursor: 'pointer' }}>
+          <Card>
+            <CardHeader title="LM Bucket multipliers (scenario-only)">
+              <Tag>Impacts demand hours</Tag>
+            </CardHeader>
+          </Card>
+        </summary>
+        <Card style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, borderTop: 'none' }}>
+          <CardBody>
           <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
             Adjust how <strong>Total LMs</strong> map to <strong>LM multipliers</strong>. This affects projects whose LM multiplier appears to be bucket-derived (explicit file multipliers are preserved).
           </div>
@@ -1524,15 +1744,21 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
               Reset LM bucket table
             </button>
           )}
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </details>
 
       {/* Orbit × VIBE final multipliers */}
-      <Card style={{ marginTop: 14 }}>
-        <CardHeader title="Orbit × VIBE final multipliers (CSM only)">
-          <Tag>Scenario-only</Tag>
-        </CardHeader>
-        <CardBody>
+      <details style={{ marginTop: 14 }} open={false}>
+        <summary style={{ listStyle: 'none', cursor: 'pointer' }}>
+          <Card>
+            <CardHeader title="Orbit × VIBE final multipliers (CSM only)">
+              <Tag>Scenario-only</Tag>
+            </CardHeader>
+          </Card>
+        </summary>
+        <Card style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, borderTop: 'none' }}>
+          <CardBody>
           <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
             Overrides the <strong>CSM</strong> orbit multiplier lookup used in final utilized hours. Baseline values come from the uploaded workbook’s Demand Matrix (when available).
           </div>
@@ -1599,8 +1825,646 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, planningYe
               Reset Orbit × VIBE overrides
             </button>
           )}
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </details>
+    </div>
+  )
+}
+
+function WorkingDaysDeltaEditor({ planningYear = 2026, roster = [], value, onChange, onAfterAdd }) {
+  const rosterNames = useMemo(() => {
+    const set = new Set()
+    for (const p of Array.isArray(roster) ? roster : []) {
+      const n = String(p?.name || '').trim()
+      if (n) set.add(n)
+    }
+    return [...set.values()].sort((a, b) => a.localeCompare(b))
+  }, [roster])
+
+  const [person, setPerson] = useState(rosterNames[0] || '')
+  const [kind, setKind] = useState('pto')
+  const [name, setName] = useState('')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
+
+  const map = (value && typeof value === 'object' && value.personAdjustmentsByPerson && typeof value.personAdjustmentsByPerson === 'object')
+    ? value.personAdjustmentsByPerson
+    : {}
+
+  const rows = useMemo(() => {
+    const out = []
+    for (const [personName, arr] of Object.entries(map)) {
+      for (const it of (Array.isArray(arr) ? arr : [])) {
+        out.push({ person: personName, ...it })
+      }
+    }
+    return out.sort((a, b) => (a.person || '').localeCompare(b.person || ''))
+  }, [map])
+
+  const uid = () => `scwd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+
+  const push = () => {
+    const p = String(person || '').trim()
+    const sd = String(startDate || '').trim()
+    const ed = String(endDate || '').trim() || sd
+    const nm =
+      String(name || '').trim() ||
+      (kind === 'pto' ? 'PTO' : kind === 'non_project' ? 'Non-project work' : 'Weekend work')
+    if (!p || !sd || !ed) return
+
+    const nextMap = { ...map }
+    const prev = Array.isArray(nextMap[p]) ? nextMap[p] : []
+    nextMap[p] = [...prev, { id: uid(), kind, name: nm, startDate: sd, endDate: ed }]
+    const next = { personAdjustmentsByPerson: nextMap }
+    onChange?.(next)
+    onAfterAdd?.({ person: p, kind, startDate: sd, endDate: ed })
+    setName('')
+    setStartDate('')
+    setEndDate('')
+  }
+
+  const remove = (personName, id) => {
+    const nextMap = { ...map }
+    const prev = Array.isArray(nextMap[personName]) ? nextMap[personName] : []
+    const nextArr = prev.filter(x => x?.id !== id)
+    if (nextArr.length) nextMap[personName] = nextArr
+    else delete nextMap[personName]
+    const has = Object.keys(nextMap).length > 0
+    onChange?.(has ? { personAdjustmentsByPerson: nextMap } : null)
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'end', marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Person</div>
+          <input
+            list="sc_wd_people"
+            value={person}
+            onChange={(e) => setPerson(e.target.value)}
+            placeholder="Pick person"
+            style={inputStyle()}
+          />
+          <datalist id="sc_wd_people">
+            {rosterNames.map(n => <option key={n} value={n} />)}
+          </datalist>
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Type</div>
+          <select value={kind} onChange={(e) => setKind(e.target.value)} style={{ ...inputStyle(), height: 40 }}>
+            <option value="pto">PTO (remove days)</option>
+            <option value="non_project">Non-project work (remove days)</option>
+            <option value="weekend_work">Weekend work (add days)</option>
+          </select>
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Name</div>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g., PTO, Onsite, Support work" style={inputStyle()} />
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Start date</div>
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={inputStyle()} />
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>End date</div>
+          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={inputStyle()} />
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button onClick={push} style={btnStyle('primary')}>Add adjustment</button>
+      </div>
+
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: C.faint }}>No scenario-only working day adjustments yet.</div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: 'var(--surface-1)' }}>
+                {['Person', 'Type', 'Name', 'Range', ''].map(h => (
+                  <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.id || i} style={{ background: i % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
+                  <td style={{ padding: '8px 12px', fontWeight: 650 }}>{r.person}</td>
+                  <td style={{ padding: '8px 12px', color: C.muted }}>{r.kind}</td>
+                  <td style={{ padding: '8px 12px' }}>{r.name}</td>
+                  <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: C.muted }}>{r.startDate} → {r.endDate}</td>
+                  <td style={{ padding: '8px 12px', textAlign: 'right' }}>
+                    <button onClick={() => remove(r.person, r.id)} style={btnStyle('danger-sm')}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssignmentBackfillsDeltaEditor({
+  planningYear = 2026,
+  projects = [],
+  roster = [],
+  focusPeople = [],
+  initialFocusPerson = '',
+  initialStartDate = '',
+  initialEndDate = '',
+  suggestSlackFor = null,
+  value,
+  onChange
+}) {
+  const allProjectOptions = useMemo(() => {
+    return (Array.isArray(projects) ? projects : [])
+      .filter(Boolean)
+      .map(p => ({ id: String(p?.id || '').trim(), name: String(p?.name || '').trim() }))
+      .filter(p => p.id)
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
+  }, [projects])
+  const projectById = useMemo(() => {
+    const m = new Map()
+    for (const p of (Array.isArray(projects) ? projects : [])) {
+      const id = String(p?.id || '').trim()
+      if (id) m.set(id, p)
+    }
+    return m
+  }, [projects])
+  const projectNameById = useMemo(() => {
+    const m = new Map()
+    for (const p of allProjectOptions) m.set(p.id, p.name || p.id)
+    return m
+  }, [allProjectOptions])
+
+  const rosterByRole = useMemo(() => {
+    const out = { CSM: [], PM: [], 'Analyst 1': [] }
+    for (const p of Array.isArray(roster) ? roster : []) {
+      const name = String(p?.name || '').trim()
+      if (!name) continue
+      const roleRaw = String(p?.role || '').trim()
+      const baseRole = roleRaw === 'Analyst' ? 'Analyst 1' : roleRaw
+      if (!out[baseRole]) out[baseRole] = []
+      if (!out[baseRole].includes(name)) out[baseRole].push(name)
+    }
+    for (const k of Object.keys(out)) out[k].sort((a, b) => a.localeCompare(b))
+    return out
+  }, [roster])
+
+  const map = (value && typeof value === 'object') ? value : {}
+
+  const rows = useMemo(() => {
+    const out = []
+    for (const [projectId, byRole] of Object.entries(map || {})) {
+      if (!byRole || typeof byRole !== 'object') continue
+      for (const [role, arr] of Object.entries(byRole || {})) {
+        for (const it of (Array.isArray(arr) ? arr : [])) {
+          if (!it) continue
+          out.push({ projectId, role, ...it })
+        }
+      }
+    }
+    return out.sort((a, b) => {
+      const ap = projectNameById.get(a.projectId) || a.projectId
+      const bp = projectNameById.get(b.projectId) || b.projectId
+      if (ap !== bp) return ap.localeCompare(bp)
+      if ((a.role || '') !== (b.role || '')) return (a.role || '').localeCompare(b.role || '')
+      return String(a.startDate || '').localeCompare(String(b.startDate || ''))
+    })
+  }, [map, projectNameById])
+
+  const uid = () => `scbf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+
+  const [projectId, setProjectId] = useState(allProjectOptions[0]?.id || '')
+  const [role, setRole] = useState('CSM')
+  const [focusPerson, setFocusPerson] = useState((Array.isArray(focusPeople) && focusPeople.length) ? focusPeople[0] : '')
+  const [fromPerson, setFromPerson] = useState('Unassigned')
+  const [toPerson, setToPerson] = useState('')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
+  const [note, setNote] = useState('')
+  const [formError, setFormError] = useState('')
+
+  useEffect(() => {
+    const fp = String(initialFocusPerson || '').trim()
+    if (fp && fp !== focusPerson) setFocusPerson(fp)
+    if (initialStartDate && !startDate) setStartDate(initialStartDate)
+    if (initialEndDate && !endDate) setEndDate(initialEndDate)
+  }, [initialFocusPerson, initialStartDate, initialEndDate]) // eslint-disable-line react-hooks/exhaustive-deps
+  const projectOptions = useMemo(() => {
+    const fp = String(focusPerson || '').trim()
+    if (!fp) return allProjectOptions
+    const filtered = (Array.isArray(projects) ? projects : [])
+      .filter(p => {
+        if (!p) return false
+        return (
+          String(p.assignedCSM || '').trim() === fp ||
+          String(p.assignedPM || '').trim() === fp ||
+          String(p.assignedAnalyst1 || '').trim() === fp ||
+          String(p.assignedAnalyst2 || '').trim() === fp
+        )
+      })
+      .map(p => ({ id: String(p?.id || '').trim(), name: String(p?.name || '').trim() }))
+      .filter(p => p.id)
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id))
+    return filtered.length ? filtered : allProjectOptions
+  }, [focusPerson, projects, allProjectOptions])
+
+  useEffect(() => {
+    const fp = String(focusPerson || '').trim()
+    if (!fp) return
+    if (!projectOptions.find(p => p.id === projectId)) {
+      setProjectId(projectOptions[0]?.id || '')
+    }
+  }, [focusPerson, projectOptions]) // eslint-disable-line react-hooks/exhaustive-deps
+
+
+  useEffect(() => {
+    if (!focusPerson && Array.isArray(focusPeople) && focusPeople.length) setFocusPerson(focusPeople[0])
+  }, [focusPeople]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const roleChoices = useMemo(() => {
+    const all = ['CSM', 'PM', 'Analyst 1', 'Analyst 2']
+    const fp = String(focusPerson || '').trim()
+    const pid = String(projectId || '').trim()
+    if (!fp || !pid) return all
+    const proj = projectById.get(pid) || null
+    if (!proj) return all
+    const choices = []
+    if (String(proj.assignedCSM || '').trim() === fp) choices.push('CSM')
+    if (String(proj.assignedPM || '').trim() === fp) choices.push('PM')
+    if (String(proj.assignedAnalyst1 || '').trim() === fp) choices.push('Analyst 1')
+    if (String(proj.assignedAnalyst2 || '').trim() === fp) choices.push('Analyst 2')
+    return choices.length ? choices : all
+  }, [focusPerson, projectId, projectById])
+
+  useEffect(() => {
+    if (!roleChoices.includes(role)) setRole(roleChoices[0] || 'CSM')
+  }, [roleChoices]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    // Analysts share the same staffing pool for coverage; allow picking any Analyst for Analyst 1/2 backfills.
+    const isAnalystRole = String(role || '').toLowerCase().startsWith('analyst')
+    const opts = isAnalystRole
+      ? Array.from(new Set([...(rosterByRole?.['Analyst 1'] || []), ...(rosterByRole?.['Analyst 2'] || [])])).sort((a, b) => a.localeCompare(b))
+      : (rosterByRole?.[role] || [])
+    const bad = (n) => {
+      const x = String(n || '').trim()
+      if (!x) return true
+      if (x === 'Unassigned') return true
+      if (x && String(focusPerson || '').trim() && x === String(focusPerson || '').trim()) return true
+      if (x && String(fromPerson || '').trim() && x === String(fromPerson || '').trim()) return true
+      return false
+    }
+    if (!opts.includes(toPerson) || bad(toPerson)) {
+      const s = typeof suggestSlackFor === 'function'
+        ? suggestSlackFor(role, startDate || initialStartDate || '', 5, [focusPerson, fromPerson])
+        : []
+      const suggPick = s?.[0]?.name || ''
+      const pick = suggPick || opts.find(n => !bad(n)) || opts[0] || ''
+      if (pick !== toPerson) setToPerson(pick)
+    }
+    if (fromPerson !== 'Unassigned' && !opts.includes(fromPerson)) setFromPerson('Unassigned')
+  }, [role, rosterByRole, suggestSlackFor, startDate, initialStartDate, focusPerson, fromPerson]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const push = () => {
+    const pid = String(projectId || '').trim()
+    const rl = String(role || '').trim()
+    const fp = String(fromPerson || '').trim()
+    const tp = String(toPerson || '').trim()
+    const sd = String(startDate || '').trim()
+    const ed = String(endDate || '').trim() || sd
+    if (!pid || !rl || !fp || !tp || !sd) {
+      setFormError('Fill Project, Role, From, To, and Start date.')
+      return
+    }
+    if (String(tp).trim() === String(focusPerson || '').trim()) {
+      setFormError('“To” cannot be the unavailable person.')
+      return
+    }
+    setFormError('')
+
+    const next = { ...(map || {}) }
+    const byRole = { ...(next[pid] || {}) }
+    const prev = Array.isArray(byRole[rl]) ? byRole[rl] : []
+    byRole[rl] = [...prev, { id: uid(), fromPerson: fp, toPerson: tp, startDate: sd, endDate: ed, note: String(note || '').trim() || undefined }]
+    next[pid] = byRole
+    onChange?.(next)
+    setNote('')
+  }
+
+  const remove = (pid, rl, id) => {
+    const next = { ...(map || {}) }
+    const byRole = { ...(next[pid] || {}) }
+    const prev = Array.isArray(byRole[rl]) ? byRole[rl] : []
+    const nextArr = prev.filter(x => x?.id !== id)
+    if (nextArr.length) byRole[rl] = nextArr
+    else delete byRole[rl]
+    if (Object.keys(byRole).length) next[pid] = byRole
+    else delete next[pid]
+    onChange?.(Object.keys(next).length ? next : null)
+  }
+
+  const isAnalystRole = String(role || '').toLowerCase().startsWith('analyst')
+  const roleRoster = isAnalystRole
+    ? Array.from(new Set([...(rosterByRole?.['Analyst 1'] || []), ...(rosterByRole?.['Analyst 2'] || [])])).sort((a, b) => a.localeCompare(b))
+    : (rosterByRole?.[role] || [])
+
+  return (
+    <div>
+      {Array.isArray(focusPeople) && focusPeople.length ? (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted }}>
+            Backfill for (from PTO)
+          </div>
+          <select value={focusPerson} onChange={(e) => setFocusPerson(e.target.value)} style={{ ...inputStyle(), height: 40, minWidth: 220 }}>
+            {focusPeople.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <span style={{ fontSize: 11.5, color: C.faint }}>
+            Role choices below are filtered to this person’s roles on the selected project.
+          </span>
+        </div>
+      ) : null}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'end', marginBottom: 10 }}>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Project</div>
+          <select value={projectId} onChange={(e) => setProjectId(e.target.value)} style={{ ...inputStyle(), height: 40 }}>
+            {projectOptions.map(p => (
+              <option key={p.id} value={p.id}>{p.name ? `${p.name} (${p.id})` : p.id}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Role</div>
+          <select value={role} onChange={(e) => setRole(e.target.value)} style={{ ...inputStyle(), height: 40 }}>
+            {roleChoices.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>From</div>
+          <select value={fromPerson} onChange={(e) => setFromPerson(e.target.value)} style={{ ...inputStyle(), height: 40 }}>
+            <option value="Unassigned">Unassigned</option>
+            {roleRoster.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>To</div>
+          <select value={toPerson} onChange={(e) => setToPerson(e.target.value)} style={{ ...inputStyle(), height: 40 }}>
+            <option value="">— select —</option>
+            {roleRoster.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Start date</div>
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={inputStyle()} />
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>End date</div>
+          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={inputStyle()} />
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>Note (optional)</div>
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g., Cover PTO for Aug/Sept" style={inputStyle()} />
+        </div>
+      </div>
+
+      {(() => {
+        const s = typeof suggestSlackFor === 'function'
+          ? suggestSlackFor(role, startDate || initialStartDate || '', 5, [focusPerson, fromPerson])
+          : []
+        return s && s.length ? (
+          <div style={{ marginBottom: 10, fontSize: 12, color: C.muted }}>
+            Suggested coverage (highest slack):{' '}
+            <span style={{ fontFamily: 'var(--font-mono)', color: C.ink }}>
+              {s.map(x => `${x.name} (+${Math.round(x.slack)}h)`).join(' · ')}
+            </span>
+          </div>
+        ) : null
+      })()}
+
+      {!!formError && (
+        <div style={{ marginBottom: 10, fontSize: 12.5, color: 'var(--red)' }}>
+          {formError}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button onClick={push} style={btnStyle('primary')}>Add backfill</button>
+      </div>
+
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: C.faint }}>No scenario-only backfills yet.</div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: 'var(--surface-1)' }}>
+                {['Project', 'Role', 'From', 'To', 'Range', 'Note', ''].map(h => (
+                  <th key={h} style={{ padding: '9px 12px', textAlign: 'left', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, borderBottom: `1px solid ${C.border}` }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.id || i} style={{ background: i % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
+                  <td style={{ padding: '8px 12px', fontWeight: 650 }}>{projectNameById.get(r.projectId) || r.projectId}</td>
+                  <td style={{ padding: '8px 12px', color: C.muted }}>{r.role}</td>
+                  <td style={{ padding: '8px 12px' }}>{r.fromPerson}</td>
+                  <td style={{ padding: '8px 12px' }}>{r.toPerson}</td>
+                  <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: C.muted }}>{r.startDate} → {r.endDate}</td>
+                  <td style={{ padding: '8px 12px', color: C.faint }}>{r.note || '—'}</td>
+                  <td style={{ padding: '8px 12px', textAlign: 'right' }}>
+                    <button onClick={() => remove(r.projectId, r.role, r.id)} style={btnStyle('danger-sm')}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PmTaskMultipliersEditor({ baselineTasks = [], value, onChange }) {
+  const PM_PHASES = useMemo(() => ([
+    'Project Start M0',
+    'Project Start M1',
+    'Project Mid',
+    'Project End M-1',
+    'Project End M0',
+    'Project End M1',
+    'Project End M1+',
+  ]), [])
+
+  const pmRows = useMemo(() => {
+    return (Array.isArray(baselineTasks) ? baselineTasks : [])
+      .filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
+      .map(r => ({
+        stage: String(r?.stage || '').trim(),       // customer journey stage
+        taskStage: String(r?.taskStage || '').trim(),
+        phaseHours: r?.phaseHours || {},
+      }))
+      .filter(r => r.stage && r.taskStage)
+  }, [baselineTasks])
+
+  const stages = useMemo(() => {
+    const set = new Set(pmRows.map(r => r.stage))
+    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))]
+  }, [pmRows])
+
+  const [stageFilter, setStageFilter] = useState('All')
+  const [taskFilter, setTaskFilter] = useState('All')
+
+  const taskStages = useMemo(() => {
+    const filtered = stageFilter === 'All' ? pmRows : pmRows.filter(r => r.stage === stageFilter)
+    const set = new Set(filtered.map(r => r.taskStage))
+    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))]
+  }, [pmRows, stageFilter])
+
+  useEffect(() => {
+    if (!taskStages.includes(taskFilter)) setTaskFilter('All')
+  }, [taskStages]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const overridesByKey = (value && typeof value === 'object' ? value?.overridesByKey : null) || {}
+  const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
+
+  const effectiveRows = useMemo(() => {
+    const filtered = pmRows.filter(r => (
+      (stageFilter === 'All' || r.stage === stageFilter) &&
+      (taskFilter === 'All' || r.taskStage === taskFilter)
+    ))
+    return filtered
+      .slice()
+      .sort((a, b) => (a.stage !== b.stage ? a.stage.localeCompare(b.stage) : a.taskStage.localeCompare(b.taskStage)))
+  }, [pmRows, stageFilter, taskFilter])
+
+  const setOverride = (stage, taskStage, phase, nextVal) => {
+    const key = normKey(stage, taskStage)
+    const next = { ...(overridesByKey || {}) }
+    const row = { ...(next[key] || {}) }
+    if (nextVal === null) delete row[phase]
+    else row[phase] = nextVal
+    if (Object.keys(row).length) next[key] = row
+    else delete next[key]
+    onChange?.(Object.keys(next).length ? { overridesByKey: next } : null)
+  }
+
+  if (!pmRows.length) {
+    return (
+      <div style={{ fontSize: 12.5, color: C.faint, lineHeight: 1.6 }}>
+        This workbook doesn’t include the task-level “Customer Journey Stage / Stage / Role” section in <strong>Demand Base Matrix</strong>,
+        so scenario-only PM multipliers can’t be edited.
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>
+            Customer journey stage
+          </div>
+          <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} style={{ ...inputStyle(), height: 40, minWidth: 220 }}>
+            {stages.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>
+            Stage
+          </div>
+          <select value={taskFilter} onChange={(e) => setTaskFilter(e.target.value)} style={{ ...inputStyle(), height: 40, minWidth: 320 }}>
+            {taskStages.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        {!!Object.keys(overridesByKey || {}).length && (
+          <button onClick={() => onChange?.(null)} style={{ ...btnStyle('danger-sm'), marginLeft: 'auto' }}>
+            Reset PM multipliers
+          </button>
+        )}
+      </div>
+
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: 'var(--surface-1)' }}>
+              {['Customer journey', 'Stage', 'Role', ...PM_PHASES].map(h => (
+                <th
+                  key={h}
+                  style={{
+                    padding: '9px 10px',
+                    textAlign: 'left',
+                    fontSize: 10.5,
+                    fontWeight: 800,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.6px',
+                    color: C.muted,
+                    borderBottom: `1px solid ${C.border}`,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {effectiveRows.map((r, idx) => {
+              const key = normKey(r.stage, r.taskStage)
+              const ov = overridesByKey?.[key] || null
+              return (
+                <tr key={key} style={{ background: idx % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
+                  <td style={{ padding: '8px 10px', fontWeight: 750, color: C.ink, whiteSpace: 'nowrap' }}>{r.stage}</td>
+                  <td style={{ padding: '8px 10px', color: C.muted, minWidth: 260 }}>{r.taskStage}</td>
+                  <td style={{ padding: '8px 10px', fontFamily: 'var(--font-mono)', color: C.faint }}>PM</td>
+                  {PM_PHASES.map(ph => {
+                    const base = Number(r.phaseHours?.[ph] || 0)
+                    const has = ov && ov[ph] !== undefined && ov[ph] !== null
+                    const eff = has ? Number(ov[ph]) : base
+                    const changed = has && Number.isFinite(eff) && eff !== base
+                    return (
+                      <td key={ph} style={{ padding: '6px 10px' }}>
+                        <input
+                          type="number"
+                          value={Number.isFinite(eff) ? eff : ''}
+                          onChange={(e) => {
+                            const raw = e.target.value
+                            if (raw === '') return setOverride(r.stage, r.taskStage, ph, null)
+                            const n = Number(raw)
+                            if (!Number.isFinite(n)) return
+                            setOverride(r.stage, r.taskStage, ph, n)
+                          }}
+                          style={{
+                            ...inputStyle({ width: 120 }),
+                            height: 36,
+                            fontFamily: 'var(--font-mono)',
+                            borderColor: changed ? 'rgba(167,139,250,0.55)' : C.border,
+                            background: changed ? 'rgba(167,139,250,0.08)' : C.surface,
+                          }}
+                        />
+                        {changed && (
+                          <div style={{ marginTop: 4, fontSize: 10.5, color: C.faint }}>
+                            baseline {base}
+                          </div>
+                        )}
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -1704,7 +2568,7 @@ function AttritionOverridesTab({ globalAttrition, perRole, onPatchGlobal, onPatc
 // COMPARE PANEL
 // ─────────────────────────────────────────────────────────────────────────
 
-function ComparePanel({ sc, baselineCalc }) {
+function ComparePanel({ sc, baselineCalc, baselineCapacityConfig = null }) {
   const { activeScenario, scenarioCalc, scenarioCap, calcLoading, calcError, diff, activeSummary, editScenario } = sc
   // Scenarios always show Analyst demand as A1 + A2 total (consistent with Overview).
   // Capacity remains tied to Analyst 1 (Analyst 2 is incremental demand pressure).
@@ -1712,6 +2576,150 @@ function ComparePanel({ sc, baselineCalc }) {
 
   // Hooks must remain unconditional — compute baseline capacity config up front
   const planningYear = baselineCalc?.meta?.planningYear || 2026
+  const scenarioCfg = useMemo(() => {
+    if (!activeScenario) return null
+    return buildScenarioCapacityConfig({
+      roster: sc?.baselineIngest?.roster || [],
+      planningYear,
+      resourceOverrides: activeScenario?.resourceOverrides || {},
+      assumptionOverrides: activeScenario?.assumptionOverrides || {},
+      attritionOverrides: activeScenario?.attritionOverrides || {},
+      baselineCapacityConfig: baselineCapacityConfig || null,
+    })
+  }, [activeScenario, sc?.baselineIngest, planningYear, baselineCapacityConfig])
+
+  const availabilityGaps = useMemo(() => {
+    const rows = Array.isArray(scenarioCalc?.assignments) ? scenarioCalc.assignments : []
+    const map = new Map()
+    for (const r of rows) {
+      if (!r || !r.isUnstaffed) continue
+      if (String(r.unstaffedReason || '') !== 'availability') continue
+      const h = Number(r.finalHours)
+      if (!Number.isFinite(h) || h <= 0) continue
+      const monthIndex = Number(r.monthIndex)
+      if (!Number.isFinite(monthIndex) || monthIndex < 0 || monthIndex > 11) continue
+      const role = String(r.role || '').trim()
+      if (!role) continue
+      const projectId = String(r.projectId || '').trim()
+      const projectName = String(r.projectName || '').trim() || projectId || '(unnamed)'
+      const sourcePerson = String(r.sourcePerson || '').trim() || '—'
+      const key = `${role}__${monthIndex}__${projectId}__${sourcePerson}`
+      const prev = map.get(key)
+      if (!prev) {
+        map.set(key, { key, role, monthIndex, projectId, projectName, sourcePerson, hours: h })
+      } else prev.hours += h
+    }
+    return [...map.values()].sort((a, b) => (b.hours || 0) - (a.hours || 0))
+  }, [scenarioCalc?.assignments])
+
+  const backfillCoverageSummary = useMemo(() => {
+    const rows = Array.isArray(scenarioCalc?.assignments) ? scenarioCalc.assignments : []
+    const byPerson = new Map() // person -> Map(projectName -> hours)
+    const totalByPerson = new Map()
+    for (const r of rows) {
+      if (!r) continue
+      if (String(r.reassignmentReason || '') !== 'backfill') continue
+      const to = String(r.backfillTo || r.person || '').trim()
+      if (!to || to === 'Unassigned') continue
+      const h = Number(r.finalHours)
+      if (!Number.isFinite(h) || h <= 0) continue
+      const projectName = String(r.projectName || '').trim() || String(r.projectId || '').trim() || '(unnamed)'
+      if (!byPerson.has(to)) byPerson.set(to, new Map())
+      const mp = byPerson.get(to)
+      mp.set(projectName, (mp.get(projectName) || 0) + h)
+      totalByPerson.set(to, (totalByPerson.get(to) || 0) + h)
+    }
+    const people = [...byPerson.keys()].sort((a, b) => (totalByPerson.get(b) || 0) - (totalByPerson.get(a) || 0))
+    if (!people.length) return ''
+    const parts = []
+    for (const person of people.slice(0, 6)) {
+      const projMap = byPerson.get(person) || new Map()
+      const projParts = [...projMap.entries()]
+        .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+        .slice(0, 3)
+        .map(([pn, hrs]) => `${Math.round(hrs).toLocaleString()}h on ${pn}`)
+      parts.push(`${person} (${projParts.join(', ')})`)
+    }
+    const more = people.length - parts.length
+    return more > 0 ? `${parts.join(', ')} +${more} more` : parts.join(', ')
+  }, [scenarioCalc?.assignments])
+
+  const slackCandidatesFor = useCallback((roleRaw, monthIndex, topN = 5) => {
+    if (!scenarioCfg || !scenarioCalc) return []
+    const mi = Number(monthIndex)
+    if (!Number.isFinite(mi) || mi < 0 || mi > 11) return []
+
+    const role = (roleRaw === 'Analyst 2') ? 'Analyst 1' : roleRaw
+    const businessDaysByMonth = scenarioCfg.businessDaysByMonth || new Array(12).fill(0)
+    const baseDays = Number(businessDaysByMonth?.[mi] || 0)
+    if (!(baseDays > 0)) return []
+
+    const roster = scenarioCfg.roster || []
+    const rosterDays = computeRosterWorkingDaysByMonth({
+      year: scenarioCfg.planningYear || planningYear,
+      baseBusinessDaysByMonth: businessDaysByMonth,
+      roster,
+      workingDays: scenarioCfg.workingDays || null,
+    })
+
+    const byRole = scenarioCfg.hrsPerPersonMonthByMonthByRole || {}
+    const baseMonthHoursArr = byRole?.[role] || scenarioCfg.hrsPerPersonMonthByMonth || new Array(12).fill(HRS_PER_PERSON_MONTH)
+    const baseMonthHours = Number(baseMonthHoursArr?.[mi] || 0)
+
+    const alloc = scenarioCfg.allocationsByPerson || null
+    const DEFAULT_HALF_TIME_NAME = 'Aalimah Showkat'
+    const isDefaultHalfTime = (name) => String(name || '').trim().toLowerCase() === DEFAULT_HALF_TIME_NAME.toLowerCase()
+    const rosterBaseRoleByName = new Map()
+    const rosterFteByName = new Map()
+    for (const p of Array.isArray(roster) ? roster : []) {
+      const n = String(p?.name || '').trim()
+      if (!n) continue
+      const rr = String(p?.role || '').trim()
+      const baseRole = rr === 'Analyst' ? 'Analyst 1' : rr
+      const f = Number(p?.fte)
+      if (Number.isFinite(f) && f > 0) rosterFteByName.set(n, Math.max(rosterFteByName.get(n) || 0, f))
+      if (!rosterBaseRoleByName.has(n) && baseRole) rosterBaseRoleByName.set(n, baseRole)
+    }
+    const pctFor = (name) => {
+      const rec = alloc?.[name]
+      if (rec && typeof rec === 'object') {
+        const v = rec?.roles?.[role]
+        const n = Number(v)
+        return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
+      }
+      if (isDefaultHalfTime(name)) return rosterBaseRoleByName.get(name) === role ? 50 : 0
+      return rosterBaseRoleByName.get(name) === role ? 100 : 0
+    }
+
+    // demandByPerson is keyed by `${role}__${name}`
+    const dp = scenarioCalc.demandByPerson || {}
+    const demandFor = (name) => {
+      if (roleRaw === 'Analyst 2') {
+        // backfill for A2: treat demand as Analyst 1 (capacity-bearing) only
+        const rec = dp[`Analyst 1__${name}`]
+        return Number(rec?.monthly?.[mi] || 0)
+      }
+      const rec = dp[`${role}__${name}`]
+      return Number(rec?.monthly?.[mi] || 0)
+    }
+
+    const ranked = []
+    for (const name of rosterFteByName.keys()) {
+      const fte = rosterFteByName.get(name) || 0
+      if (!(fte > 0)) continue
+      const pct = pctFor(name)
+      if (!(pct > 0)) continue
+      const d = Number(rosterDays?.[name]?.daysByMonth?.[mi])
+      const scaledMonth = (baseDays > 0 && Number.isFinite(d)) ? baseMonthHours * (d / baseDays) : baseMonthHours
+      const cap = scaledMonth * fte * (pct / 100)
+      const dem = demandFor(name)
+      const slack = cap - dem
+      if (!Number.isFinite(slack)) continue
+      ranked.push({ name, slack })
+    }
+    ranked.sort((a, b) => (b.slack || 0) - (a.slack || 0))
+    return ranked.slice(0, topN)
+  }, [scenarioCfg, scenarioCalc, planningYear])
   const baselineConfig = useMemo(
     () => buildScenarioCapacityConfig({ roster: sc?.baselineIngest?.roster || [], planningYear }),
     [sc?.baselineIngest, planningYear]
@@ -1728,6 +2736,8 @@ function ComparePanel({ sc, baselineCalc }) {
     const sum = (arr) => (arr || []).reduce((a, b) => a + (b || 0), 0)
     const roles = ['CSM', 'PM', 'Analyst']
     const capKey = (role) => (role === 'Analyst' ? 'Analyst 1' : role)
+    const baselineScenario = activeScenario || {}
+    const assume = baselineScenario?.assumptionOverrides || {}
 
     const demandSeries = (calc, role) => {
       if (role !== 'Analyst') return calc?.demandByRole?.[role] || new Array(12).fill(0)
@@ -1904,11 +2914,28 @@ function ComparePanel({ sc, baselineCalc }) {
       return { role, delta: sum(sArr) - sum(bArr) }
     })
 
+    const countWorkingDaysAdj = (() => {
+      const wd = assume?.workingDaysDelta || null
+      const map = wd?.personAdjustmentsByPerson || {}
+      let n = 0
+      for (const arr of Object.values(map || {})) n += (Array.isArray(arr) ? arr.length : 0)
+      return n
+    })()
+    const countBackfills = (() => {
+      const bf = assume?.assignmentBackfillsDelta || null
+      let n = 0
+      for (const byRole of Object.values(bf || {})) {
+        for (const arr of Object.values(byRole || {})) n += (Array.isArray(arr) ? arr.length : 0)
+      }
+      return n
+    })()
+
     return {
       roleSummaries,
       topProjectDrivers,
       topOverloads,
       unstaffedDelta,
+      adjustmentsSummary: { workingDays: countWorkingDaysAdj, backfills: countBackfills },
       formatH,
       formatMonthsDelta,
     }
@@ -1984,6 +3011,19 @@ function ComparePanel({ sc, baselineCalc }) {
             <Tag>Δ vs baseline</Tag>
           </CardHeader>
           <CardBody>
+            {(impact.adjustmentsSummary?.workingDays || impact.adjustmentsSummary?.backfills) ? (
+              <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ fontSize: 11, color: C.muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Adjustments in this scenario
+                </div>
+                {(impact.adjustmentsSummary?.workingDays || 0) > 0 && (
+                  <Pill type="purple">{impact.adjustmentsSummary.workingDays} working-days</Pill>
+                )}
+                {(impact.adjustmentsSummary?.backfills || 0) > 0 && (
+                  <Pill type="blue">{impact.adjustmentsSummary.backfills} backfill{impact.adjustmentsSummary.backfills === 1 ? '' : 's'}</Pill>
+                )}
+              </div>
+            ) : null}
             <div style={{ display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: 14, alignItems: 'start' }}>
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 900, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted, marginBottom: 10 }}>
@@ -2105,8 +3145,52 @@ function ComparePanel({ sc, baselineCalc }) {
                       .join(' · ') || '—'}
                   </div>
                 )}
+
+                {!!backfillCoverageSummary && (
+                  <div style={{ marginTop: 8, fontSize: 11.5, color: C.faint, lineHeight: 1.55 }}>
+                    <strong>Backfills applied:</strong>{' '}
+                    {backfillCoverageSummary}
+                  </div>
+                )}
               </div>
             </div>
+
+            {availabilityGaps.length > 0 && (
+              <div style={{ marginTop: 14, borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 900, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted, marginBottom: 10 }}>
+                  Coverage suggestions (from PTO/unavailability)
+                </div>
+                <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 10 }}>
+                  These hours became <strong>Unassigned</strong> due to availability changes. Use <strong>Backfills / reassignment</strong> inside <strong>Availability & coverage</strong> in Assumptions/Overrides to reassign.
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {availabilityGaps.slice(0, 6).map(g => {
+                    const sugg = slackCandidatesFor(g.role, g.monthIndex, 5)
+                    return (
+                      <div key={g.key} style={{ padding: '10px 12px', borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                          <div style={{ fontWeight: 850, color: C.ink }}>
+                            {MONTHS[g.monthIndex]} · {g.role} · {Math.round(g.hours).toLocaleString()}h unassigned
+                          </div>
+                          <div style={{ color: C.faint, fontSize: 12 }}>
+                            {g.projectName} · from {g.sourcePerson}
+                          </div>
+                        </div>
+                        {sugg.length ? (
+                          <div style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 12, color: C.muted }}>
+                            Suggested coverage: {sugg.map(s => `${s.name} (+${Math.round(s.slack)}h)`).join(' · ')}
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: 6, fontSize: 12, color: C.faint }}>
+                            No obvious slack candidates found for this role/month.
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </CardBody>
         </Card>
       )}
@@ -2843,29 +3927,7 @@ function FieldGroup({ label, children }) {
   )
 }
 
-function InlineWarn({ text, onProceed, onChooseElse }) {
-  return (
-    <div style={{
-      marginTop: 6,
-      padding: '6px 10px',
-      background: 'var(--amber-light, #fefce8)',
-      border: '1px solid #fde68a',
-      borderRadius: 6,
-      display: 'flex',
-      gap: 8,
-      alignItems: 'center',
-      flexWrap: 'wrap',
-      fontSize: 11.5,
-      color: C.muted,
-    }}>
-      <span style={{ flex: 1 }}>
-        <strong>{PMO_WARN_NAME}</strong> — {text}
-      </span>
-      <button onClick={onProceed} style={btnStyle('primary')}>Proceed</button>
-      <button onClick={onChooseElse} style={btnStyle('danger-sm')}>Choose someone else</button>
-    </div>
-  )
-}
+// InlineWarn removed (scenarios are allocation-aware)
 
 function DatalistEnumField({ id, value, placeholder, options, onCommit }) {
   const listId = id
@@ -2954,13 +4016,12 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
     return Array.isArray(options) ? options.includes(s) : false
   }, [draft, options])
 
-  const commit = useCallback(({ forceNew = false, forcePmo = false } = {}) => {
+  const commit = useCallback(({ forceNew = false } = {}) => {
     const s = norm(draft)
     // Treat “same as baseline” as no override.
     if (s === baselineNorm && overrideValue === undefined) { setNeedsConfirm(false); return }
     if (s === baselineNorm && overrideValue !== undefined) { onChange?.(undefined); setNeedsConfirm(false); return }
     if (!s) { onChange?.(null); setNeedsConfirm(false); return }
-    if (!forcePmo && s === 'Aalimah Showkat') { setNeedsPmoWarn(true); return }
     if (isKnown || forceNew) { onChange?.(s); setNeedsConfirm(false); return }
     setNeedsConfirm(true)
   }, [draft, isKnown, onChange, baselineNorm, overrideValue])
@@ -2974,7 +4035,8 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
             const v = e.target.value
             setDraft(v)
             setNeedsConfirm(false)
-            if (String(v || '').trim() === PMO_WARN_NAME) setNeedsPmoWarn(true)
+            // PMO warning removed (scenarios are allocation-aware)
+            if (String(v || '').trim() === PMO_WARN_NAME) setNeedsPmoWarn(false)
           }}
           onFocus={(e) => {
             // Make it easy to overwrite the auto-filled baseline value.
@@ -3043,32 +4105,7 @@ function RosterAssignmentField({ role, projectId, baselineName, overrideValue, o
         </div>
       )}
 
-      {needsPmoWarn && (
-        <div style={{
-          marginTop: 6, padding: '6px 10px',
-          background: 'var(--amber-light, #fefce8)', border: '1px solid #fde68a',
-          borderRadius: 6, display: 'flex', gap: 8, alignItems: 'center',
-          flexWrap: 'wrap', fontSize: 11.5, color: C.muted,
-        }}>
-          <span style={{ flex: 1 }}>
-            <strong>Aalimah Showkat</strong> supports PMO as well. Bandwidth may be split across departments. Continue?
-          </span>
-          <button
-            onMouseDown={() => { suppressBlurRef.current = true }}
-            onClick={() => { setNeedsPmoWarn(false); commit({ forcePmo: true }) }}
-            style={btnStyle('primary')}
-          >
-            Proceed
-          </button>
-          <button
-            onMouseDown={() => { suppressBlurRef.current = true }}
-            onClick={() => { setNeedsPmoWarn(false); setDraft('') }}
-            style={btnStyle('danger-sm')}
-          >
-            Choose someone else
-          </button>
-        </div>
-      )}
+      {/* PMO warning removed (scenarios are allocation-aware) */}
 
       <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4, lineHeight: 1.4 }}>
         Baseline: {baselineName || 'Unassigned'}

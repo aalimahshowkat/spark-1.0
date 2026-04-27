@@ -1,6 +1,10 @@
 import { isAuthEnabled, parseCookies, SESSION_COOKIE, verifySession, getSessionSecret } from '../_utils.js'
 
 export default function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.statusCode = 405
+    return res.end('Method Not Allowed')
+  }
   const authRequired = isAuthEnabled()
   const secret = getSessionSecret()
   const cookies = parseCookies(req.headers.cookie)

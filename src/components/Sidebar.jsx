@@ -41,7 +41,7 @@ export default function Sidebar({ nav, active, onNav, isEnabled, fileName }) {
       {/* Footer */}
       <div style={{ padding: '10px 18px', borderTop: '1px solid var(--sidebar-border)' }}>
         <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', textAlign: 'center', letterSpacing: '0.3px' }}>
-          Spark 1.0 · 2026
+          Spark 1.1 · 2026
         </div>
       </div>
     </aside>
@@ -84,6 +84,12 @@ function NavItem({ item, isActive, isEnabled, onNav }) {
 
   const textColor = isActive ? '#fff' : !enabled ? 'rgba(255,255,255,0.2)' : hovered ? 'rgba(255,255,255,0.9)' : 'var(--sidebar-text)'
   const bg = isActive ? 'rgba(255,255,255,0.09)' : hovered && clickable ? 'rgba(255,255,255,0.04)' : 'transparent'
+  const accent =
+    item.id === 'ai' ? 'rgba(167,139,250,1)' :       // purple
+    item.id === 'guide' ? 'rgba(34,197,94,1)' :      // green
+    item.id === 'scenarios' ? 'rgba(245,158,11,1)' : // amber
+    item.id === 'exports' ? 'rgba(56,189,248,1)' :   // sky
+    'var(--accent)'
   const Icon = item.icon
 
   return (
@@ -101,7 +107,7 @@ function NavItem({ item, isActive, isEnabled, onNav }) {
       }}
     >
       {isActive && (
-        <div style={{ position: 'absolute', left: 0, top: '20%', bottom: '20%', width: 2.5, background: 'var(--accent)', borderRadius: '0 2px 2px 0' }} />
+        <div style={{ position: 'absolute', left: 0, top: '18%', bottom: '18%', width: 3, background: accent, borderRadius: '0 3px 3px 0' }} />
       )}
       <span style={{ color: textColor, opacity: !enabled ? 0.3 : 1, flexShrink: 0 }}>
         {Icon && <Icon size={15} color={textColor} />}

@@ -36,6 +36,32 @@ function normalizeFte(v) {
   return Math.round(n * 100) / 100
 }
 
+function normalizeRosterRows(roster) {
+  const rows = Array.isArray(roster) ? roster : []
+  const used = new Set()
+  const out = []
+  for (const p of rows) {
+    const name = safeText(p?.name)
+    const role = safeText(p?.role)
+    const baseId = safeText(p?.id) || newId(role, name)
+    let id = baseId
+    let i = 2
+    while (used.has(id)) {
+      id = `${baseId}__${i}`
+      i++
+    }
+    used.add(id)
+    out.push({
+      ...p,
+      id,
+      name,
+      role,
+      fte: normalizeFte(p?.fte),
+    })
+  }
+  return out
+}
+
 function rosterSummary(roster) {
   const out = {}
   for (const r of ROLES) out[r] = 0
@@ -52,7 +78,6 @@ export default function OrgRosterModal({
   isOpen,
   onClose,
   roster,
-  seedFromProjects, // () => roster[]
   onSaveRoster, // ({ roster, editorName, note })
   planLabel,
 }) {
@@ -62,8 +87,10 @@ export default function OrgRosterModal({
   const [draft, setDraft] = useState(null) // { id, name, role, fte }
   const [errors, setErrors] = useState([])
 
+  const normRoster = useMemo(() => normalizeRosterRows(roster), [roster])
+
   const list = useMemo(() => {
-    const rows = Array.isArray(roster) ? roster : []
+    const rows = normRoster
     const t = safeText(q).toLowerCase()
     const filtered = t
       ? rows.filter(p =>
@@ -72,9 +99,9 @@ export default function OrgRosterModal({
         )
       : rows
     return filtered.slice().sort((a, b) => (String(a.role || '') + String(a.name || '')).localeCompare(String(b.role || '') + String(b.name || '')))
-  }, [roster, q])
+  }, [normRoster, q])
 
-  const summary = useMemo(() => rosterSummary(roster || []), [roster])
+  const summary = useMemo(() => rosterSummary(normRoster || []), [normRoster])
 
   const startAdd = () => {
     setErrors([])
@@ -92,7 +119,7 @@ export default function OrgRosterModal({
   }
 
   const remove = async (p) => {
-    const next = (roster || []).filter(x => x.id !== p.id)
+    const next = (normRoster || []).filter(x => x.id !== p.id)
     safeLocalStorageSet('spark_editor_name', safeText(editorName))
     await onSaveRoster?.({
       roster: next,
@@ -120,7 +147,7 @@ export default function OrgRosterModal({
       role: safeText(draft.role),
       fte: normalizeFte(draft.fte),
     }
-    const next = (roster || []).slice()
+    const next = (normRoster || []).slice()
     const idx = next.findIndex(x => x.id === id)
     if (idx >= 0) next[idx] = row
     else next.push(row)
@@ -132,17 +159,6 @@ export default function OrgRosterModal({
     })
     setDraft(null)
     setErrors([])
-    setNote('')
-  }
-
-  const importFromProjects = async () => {
-    const seeded = seedFromProjects?.() || []
-    safeLocalStorageSet('spark_editor_name', safeText(editorName))
-    await onSaveRoster?.({
-      roster: seeded,
-      editorName: safeText(editorName),
-      note: safeText(note) || 'Seeded roster from project assignments',
-    })
     setNote('')
   }
 
@@ -194,9 +210,6 @@ export default function OrgRosterModal({
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <ActionButton onClick={startAdd}>+ Add person</ActionButton>
-            <ActionButton onClick={importFromProjects} title="Seed roster from project assignment fields">
-              Import from assignments
-            </ActionButton>
             <ActionButton onClick={() => onClose?.()}>Close</ActionButton>
           </div>
         </div>

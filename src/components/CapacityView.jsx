@@ -81,6 +81,7 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
   const rawCapByMonth = capRow?.rawMonthlyByMonth || new Array(12).fill(0)
   const effCapByMonth = capRow?.effectiveMonthlyByMonth || new Array(12).fill(0)
   const hrsPerPersonMonthByMonth = capRow?.hrsPerPersonMonthByMonth || new Array(12).fill(160)
+  const hrsPerPersonDay = capRow?.hrsPerPersonDay ?? 10
   const fteAvailable = capRow?.fte || 0
 
   const rawCapAvg = rawCapByMonth.reduce((a, b) => a + (b || 0), 0) / 12
@@ -118,7 +119,8 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
   }
   const fteNeeded = dem.map((d, i) => {
     const denom = hrsPerPersonMonthByMonth[i] || 0
-    return denom ? +(d / denom).toFixed(2) : 0
+    if (!denom) return d > 0 ? null : 0
+    return +(d / denom).toFixed(2)
   })
   const fteData = {
     labels: MONTHS,
@@ -134,7 +136,7 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
     ? (hasAnalyst2 ? buildAnalystMerged(analystPeople) : (analystPeople.base || []))
     : (people[role] || [])
   const sortedPeople = [...peopleList].sort((a,b) => b.total - a.total)
-  const hrsPerPersonYear = hrsPerPersonMonthByMonth.reduce((a, b) => a + (b || 0), 0) || 0
+  const roleHrsPerPersonYear = hrsPerPersonMonthByMonth.reduce((a, b) => a + (b || 0), 0) || 0
 
   // Annual bar chart for people
   const annualBarData = {
@@ -142,7 +144,10 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
     datasets: [{
       label: 'Annual Hours',
       data: sortedPeople.map(p => p.total),
-      backgroundColor: sortedPeople.map(p => p.total > hrsPerPersonYear ? 'rgba(200,75,49,0.7)' : (CHART_COLORS[role] || '#888') + 'bb'),
+      backgroundColor: sortedPeople.map(p => {
+        const denom = p.capacityAnnual ?? roleHrsPerPersonYear
+        return (denom && p.total > denom) ? 'rgba(200,75,49,0.7)' : (CHART_COLORS[role] || '#888') + 'bb'
+      }),
       borderRadius: 3,
     }]
   }
@@ -189,13 +194,18 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
           </CardBody>
         </Card>
         <Card>
-          <CardHeader title="FTE Needed vs Available" tag="business-days × 10 hrs/day">
+          <CardHeader title="FTE Needed vs Available" tag={`business-days × ${hrsPerPersonDay} hrs/day`}>
             <ActionButton onClick={() => exportChartPng(fteRef, `SPARK_Capacity_${role}_FTE.png`)}>Export PNG</ActionButton>
           </CardHeader>
           <CardBody>
             <ChartBox height={240}>
               <Bar ref={fteRef} data={fteData} options={chartOpts} />
             </ChartBox>
+            {hrsPerPersonMonthByMonth.every(v => !v) && (
+              <DataNote>
+                Working hours per day are set to 0 for this role, so per-person monthly capacity is 0 and “FTE Needed” is undefined.
+              </DataNote>
+            )}
           </CardBody>
         </Card>
       </Grid>
@@ -221,14 +231,16 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
                   const rawCap = rawCapByMonth[i] || 0
                   const effCap = effCapByMonth[i] || 0
                   const s = statusStyle(d, effCap, rawCap)
+                  const utilText = rawCap ? ((d / rawCap) * 100).toFixed(1) : (d > 0 ? '∞' : '0.0')
+                  const effUtilText = effCap ? ((d / effCap) * 100).toFixed(1) : (d > 0 ? '∞' : '0.0')
                   return (
                     <tr key={m} style={{ borderBottom:'1px solid var(--border)' }}>
                       <td style={{ padding:'9px 14px', fontWeight:600 }}>{m}</td>
                       <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)' }}>{Math.round(d).toLocaleString()}</td>
                       <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)', color:'var(--ink-muted)' }}>{Math.round(rawCap).toLocaleString()}</td>
                       <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)', color:'var(--ink-muted)' }}>{Math.round(effCap).toLocaleString()}</td>
-                      <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)' }}>{rawCap ? ((d/rawCap)*100).toFixed(1) : '0.0'}%</td>
-                      <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)', color:s.color, fontWeight:s.weight }}>{effCap ? ((d/effCap)*100).toFixed(1) : '0.0'}%</td>
+                      <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)' }}>{utilText}%</td>
+                      <td style={{ padding:'9px 14px', fontFamily:'var(--font-mono)', color:s.color, fontWeight:s.weight }}>{effUtilText}%</td>
                       <td style={{ padding:'9px 14px', color:s.color, fontWeight:s.weight }}>{s.text}</td>
                     </tr>
                   )
@@ -271,7 +283,7 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
                 <Grid cols="2fr 1fr" gap={0} style={{ marginBottom:0 }}>
                   <div style={{ borderRight:'1px solid var(--border)', padding:16 }}>
                     <div style={{ fontSize:12, fontWeight:700, color:'var(--ink-muted)', marginBottom:10, textTransform:'uppercase', letterSpacing:'0.5px' }}>
-                      Monthly Utilisation Heatmap <span style={{ fontWeight:400 }}>— % of business-days × 10 hrs/day</span>
+                      Monthly Utilisation Heatmap <span style={{ fontWeight:400 }}>— % of business-days × {hrsPerPersonDay} hrs/day</span>
                     </div>
                     <div style={{ overflowX:'auto' }}>
                       <table ref={heatRef} style={{ width:'100%', borderCollapse:'collapse', fontSize:11 }}>
@@ -284,13 +296,14 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
                         </thead>
                         <tbody>
                           {sortedPeople.map(p => {
-                            const annPct = hrsPerPersonYear ? (p.total / hrsPerPersonYear) * 100 : 0
+                            const annDen = p.capacityAnnual ?? roleHrsPerPersonYear
+                            const annPct = annDen ? (p.total / annDen) * 100 : (p.total > 0 ? 999 : 0)
                             return (
                               <tr key={p.name}>
                                 <td style={nameSt()}>{p.name}</td>
                                 {p.monthly.map((h,i) => {
-                                  const denom = hrsPerPersonMonthByMonth[i] || 0
-                                  const pct = denom ? (h / denom) * 100 : 0
+                                  const denom = (p.capacityMonthly?.[i] ?? hrsPerPersonMonthByMonth[i]) || 0
+                                  const pct = denom ? (h / denom) * 100 : (h > 0 ? 999 : 0)
                                   return <td key={i} style={cellSt(pct)}>{h > 0 ? h : '—'}</td>
                                 })}
                                 <td style={{ ...cellSt(annPct), fontWeight:700 }}>{p.total}</td>
@@ -330,16 +343,32 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
                 <div style={{ padding:16, borderTop:'1px solid var(--border)' }}>
                   <div style={{ fontSize:12, fontWeight:700, color:'var(--ink-muted)', marginBottom:12, textTransform:'uppercase', letterSpacing:'0.5px' }}>Annual Utilisation vs Capacity</div>
                   {sortedPeople.map(p => {
-                    const pct = Math.min(hrsPerPersonYear ? (p.total / hrsPerPersonYear) * 100 : 0, 130)
-                    const rawPct = (hrsPerPersonYear ? (p.total / hrsPerPersonYear) * 100 : 0).toFixed(0)
-                    const barColor = p.total > hrsPerPersonYear ? 'var(--red)' : p.total > hrsPerPersonYear * 0.8 ? 'var(--amber)' : 'var(--green)'
+                    const den = p.capacityAnnual ?? roleHrsPerPersonYear
+                    const ratioPct = den ? (p.total / den) * 100 : (p.total > 0 ? 999 : 0)
+                    const pct = Math.min(ratioPct, 130)
+                    const rawPct = den ? ratioPct.toFixed(0) : '∞'
+                    const hoursText = den
+                      ? `${Math.round(p.total).toLocaleString()}h / ${Math.round(den).toLocaleString()}h`
+                      : `${Math.round(p.total).toLocaleString()}h / —`
+                    const barColor = den
+                      ? (p.total > den ? 'var(--red)' : p.total > den * 0.8 ? 'var(--amber)' : 'var(--green)')
+                      : (p.total > 0 ? 'var(--red)' : 'var(--green)')
                     return (
                       <div key={p.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'7px 0', borderBottom:'1px solid var(--border)' }}>
-                        <div style={{ width:150, fontSize:13, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flexShrink:0 }}>{p.name}</div>
-                        <div style={{ flex:1, height:7, background:'var(--surface-1)', borderRadius:4 }}>
-                          <div style={{ width:`${Math.min(pct,100)}%`, height:'100%', borderRadius:4, background:barColor, transition:'width 0.4s ease' }} />
+                        <div style={{ width:150, fontSize:13, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flexShrink:0, color:'var(--ink)' }}>
+                          {p.name}
                         </div>
-                        <div style={{ width:48, textAlign:'right', fontFamily:'var(--font-mono)', fontSize:12, fontWeight:600, color:barColor }}>{rawPct}%</div>
+                        <div style={{ flex:1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>
+                            {hoursText}
+                          </div>
+                          <div style={{ height:7, background:'var(--surface-1)', borderRadius:4 }}>
+                            <div style={{ width:`${Math.min(pct,100)}%`, height:'100%', borderRadius:4, background:barColor, transition:'width 0.4s ease' }} />
+                          </div>
+                        </div>
+                        <div style={{ width:56, textAlign:'right', fontFamily:'var(--font-mono)', fontSize:12, fontWeight:650, color:barColor }}>
+                          {rawPct}%
+                        </div>
                       </div>
                     )
                   })}
@@ -357,7 +386,15 @@ export default function CapacityView({ data, uploadedFile, source = 'engine', on
 function buildAnalystMerged(analystPeople) {
   const map = new Map()
   for (const p of (analystPeople.base || [])) {
-    map.set(p.name, { name:p.name, monthly:[...p.monthly], total:p.total })
+    map.set(p.name, {
+      name: p.name,
+      fte: p.fte || 0,
+      allocationPct: p.allocationPct ?? null,
+      monthly: [...(p.monthly || new Array(12).fill(0))],
+      total: p.total || 0,
+      capacityMonthly: [...(p.capacityMonthly || new Array(12).fill(0))],
+      capacityAnnual: p.capacityAnnual ?? 0,
+    })
   }
   for (const p of (analystPeople.incremental || [])) {
     if (map.has(p.name)) {
@@ -365,7 +402,15 @@ function buildAnalystMerged(analystPeople) {
       r.monthly = r.monthly.map((v,i) => v + (p.monthly[i] || 0))
       r.total += p.total
     } else {
-      map.set(p.name, { name:p.name, monthly:[...p.monthly], total:p.total })
+      map.set(p.name, {
+        name: p.name,
+        fte: p.fte || 0,
+        allocationPct: p.allocationPct ?? null,
+        monthly: [...(p.monthly || new Array(12).fill(0))],
+        total: p.total || 0,
+        capacityMonthly: [...(p.capacityMonthly || new Array(12).fill(0))],
+        capacityAnnual: p.capacityAnnual ?? 0,
+      })
     }
   }
   return [...map.values()].sort((a,b) => b.total - a.total)

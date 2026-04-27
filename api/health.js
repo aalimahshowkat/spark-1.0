@@ -1,4 +1,4 @@
-import { getAnthropicApiKey, isAuthEnabled, parseCookies, SESSION_COOKIE, verifySession, getSessionSecret } from './_utils.js'
+import { getOpenRouterApiKey, isAuthEnabled, parseCookies, SESSION_COOKIE, verifySession, getSessionSecret } from './_utils.js'
 
 export default function handler(req, res) {
   const authRequired = isAuthEnabled()
@@ -8,7 +8,9 @@ export default function handler(req, res) {
   const session = authRequired ? verifySession(token, secret) : { user: { name: 'local' } }
   const authenticated = !!session?.user
 
-  const hasKey = !!getAnthropicApiKey()
+  const hasKey = !!getOpenRouterApiKey()
+  const hasKeyVisible = authRequired ? (authenticated ? hasKey : null) : hasKey
+  const model = String(process.env.SPARK_OPENROUTER_MODEL || '').trim() || 'openrouter/auto'
 
   res.setHeader('Content-Type', 'application/json')
   res.statusCode = 200
@@ -16,11 +18,13 @@ export default function handler(req, res) {
     ok: true,
     authRequired,
     authenticated,
-    keyConfigured: authRequired ? (authenticated ? hasKey : null) : hasKey,
-    mode: hasKey ? 'anthropic' : 'demo',
+    keyConfigured: hasKeyVisible,
+    mode: hasKey ? 'openrouter' : 'demo',
+    provider: 'openrouter',
+    model,
     message: hasKey
-      ? 'SPARK API ready'
-      : 'No Anthropic key configured. SPARK AI will run in demo mode (no external API calls).',
+      ? 'SPARK API ready (OpenRouter)'
+      : 'No OpenRouter key configured. Set OPENROUTER_API_KEY. SPARK AI will run in demo mode (no external API calls).',
   }))
 }
 
