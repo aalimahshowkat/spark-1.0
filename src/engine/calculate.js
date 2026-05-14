@@ -609,11 +609,16 @@ function computeAdvancedPmMultiplier(project, capacityConfig = null) {
 function getPmBaseHours(project, phase, matrixIndex, vibeType, capacityConfig = null) {
   if (!phase || phase === PHASE_NA) return 0
   const obj = project?.phaseHours || null
+  const adv = capacityConfig?.advancedMultipliers || null
+  const preferReconstruct =
+    adv?.forceReconstructPm === true ||
+    String(adv?.source || '').trim().toLowerCase() === 'ui' ||
+    String(adv?.source || '').trim().toLowerCase() === 'workbook'
   if (obj && typeof obj === 'object') {
     const sum = Object.values(obj).reduce((s, v) => s + (parseFloat(v) || 0), 0)
     if (sum > 0) {
       // Treat Project List values as overrides when present.
-      return getProjectPhaseHours(project, phase)
+      if (!preferReconstruct) return getProjectPhaseHours(project, phase)
     }
   }
   // Default behavior: derive PM hours from the Demand Matrix (or schema fallback),

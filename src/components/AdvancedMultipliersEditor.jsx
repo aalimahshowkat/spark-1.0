@@ -69,6 +69,9 @@ export default function AdvancedMultipliersEditor({
       if (v === undefined) delete next[k]
       else next[k] = v
     }
+    // Mark as user-driven so the engine knows to apply reconstruction even if
+    // the Project List contains PM stage-hour columns.
+    next.source = 'ui'
     const cleaned = Object.keys(next).length ? next : undefined
     onChange?.(cleaned)
   }

@@ -29,6 +29,8 @@ function mergeCapacityConfigWithWorkbookTables(capacityConfig, ingestMeta) {
     fillIfMissing('nonStandardMetricMultipliers')
     fillIfMissing('ivmsConfigurationMultipliers')
 
+    // Track source so the engine can prefer reconstruction when workbook provides weights.
+    if (!adv.source && (Object.keys(adv).length || Object.keys(wbAdv || {}).length)) adv.source = 'workbook'
     if (Object.keys(adv).length) base.advancedMultipliers = adv
   }
 
