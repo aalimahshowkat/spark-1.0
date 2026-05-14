@@ -87,6 +87,7 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
   const [collabView, setCollabView] = useState('pm_analyst') // future: pm_csm, csm_analyst
   const [collabPmQ, setCollabPmQ] = useState('')
   const [collabAnalystQ, setCollabAnalystQ] = useState('')
+  const [collabPeriod, setCollabPeriod] = useState('monthly') // 'monthly' | 'annual'
   const [collabMonthIndex, setCollabMonthIndex] = useState(0)
   const [portfolioQuery, setPortfolioQuery] = useState('')
   const [demandQuery, setDemandQuery] = useState('')
@@ -409,57 +410,63 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
 
     // Keep selection stable: if current month has no data, snap to first month with data.
     const monthIndex = months.includes(collabMonthIndex) ? collabMonthIndex : months[0]
+    const effectiveMonthIndex = collabPeriod === 'annual' ? null : monthIndex
 
-    // Build pair cells for the selected monthIndex.
-    const pmTotals = new Map()
-    const analystTotals = new Map()
+    const buildCells = (targetMonthIndex) => {
+      const pmTotals = new Map()
+      const analystTotals = new Map()
 
-    // pm__analyst -> { projects: Map(projectKey -> { name, pmHours, analystHours }) }
-    const cell = new Map()
-    const ensureCell = (pm, analyst) => {
-      const k = `${pm}__${analyst}`
-      if (!cell.has(k)) cell.set(k, { pm, analyst, projects: new Map(), pmHours: 0, analystHours: 0 })
-      return cell.get(k)
-    }
+      // pm__analyst -> { projects: Map(projectKey -> { name, pmHours, analystHours }) }
+      const cell = new Map()
+      const ensureCell = (pm, analyst) => {
+        const k = `${pm}__${analyst}`
+        if (!cell.has(k)) cell.set(k, { pm, analyst, projects: new Map(), pmHours: 0, analystHours: 0 })
+        return cell.get(k)
+      }
 
-    for (const rec of byProjectMonth.values()) {
-      if (rec.monthIndex !== monthIndex) continue
-      if (!rec.pm.size || !rec.analyst.size) continue
-      const projectKey = rec.projectKey
-      const projectName = projectNameByKey.get(projectKey) || '(unnamed)'
+      for (const rec of byProjectMonth.values()) {
+        if (!rec.pm.size || !rec.analyst.size) continue
+        if (targetMonthIndex !== null && rec.monthIndex !== targetMonthIndex) continue
 
-      for (const pm of rec.pm) {
-        const pmH = hoursBy.get(`${projectKey}__${monthIndex}__PM__${pm}`) || 0
-        pmTotals.set(pm, (pmTotals.get(pm) || 0) + pmH)
-        for (const an of rec.analyst) {
-          const anH = hoursBy.get(`${projectKey}__${monthIndex}__Analyst__${an}`) || 0
-          analystTotals.set(an, (analystTotals.get(an) || 0) + anH)
+        const mi = rec.monthIndex
+        const projectKey = rec.projectKey
+        const projectName = projectNameByKey.get(projectKey) || '(unnamed)'
 
-          const c = ensureCell(pm, an)
-          if (!c.projects.has(projectKey)) c.projects.set(projectKey, { key: projectKey, name: projectName, pmHours: 0, analystHours: 0 })
-          const pRec = c.projects.get(projectKey)
-          pRec.pmHours += pmH
-          pRec.analystHours += anH
-          c.pmHours += pmH
-          c.analystHours += anH
+        for (const pm of rec.pm) {
+          const pmH = hoursBy.get(`${projectKey}__${mi}__PM__${pm}`) || 0
+          pmTotals.set(pm, (pmTotals.get(pm) || 0) + pmH)
+          for (const an of rec.analyst) {
+            const anH = hoursBy.get(`${projectKey}__${mi}__Analyst__${an}`) || 0
+            analystTotals.set(an, (analystTotals.get(an) || 0) + anH)
+
+            const c = ensureCell(pm, an)
+            if (!c.projects.has(projectKey)) c.projects.set(projectKey, { key: projectKey, name: projectName, pmHours: 0, analystHours: 0 })
+            const pRec = c.projects.get(projectKey)
+            pRec.pmHours += pmH
+            pRec.analystHours += anH
+            c.pmHours += pmH
+            c.analystHours += anH
+          }
         }
       }
+
+      const pmList = [...pmTotals.entries()]
+        .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+        .map(([name]) => name)
+      const analystList = [...analystTotals.entries()]
+        .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+        .map(([name]) => name)
+
+      return { pmList, analystList, cell }
     }
 
-    const pmList = [...pmTotals.entries()]
-      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
-      .map(([name]) => name)
-    const analystList = [...analystTotals.entries()]
-      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
-      .map(([name]) => name)
-
-    return { months, monthIndex, pmList, analystList, cell, projectNameByKey }
-  }, [assignments, collabMonthIndex, showCollab])
+    const built = buildCells(effectiveMonthIndex)
+    return { months, monthIndex: effectiveMonthIndex, pmList: built.pmList, analystList: built.analystList, cell: built.cell, projectNameByKey }
+  }, [assignments, collabMonthIndex, collabPeriod, showCollab])
 
   const exportPmAnalystCsv = () => {
     if (!pmAnalystMatrix?.months?.length) return
     const monthIndex = pmAnalystMatrix.monthIndex
-    if (monthIndex === null || monthIndex === undefined) return
 
     const norm = (s) => String(s || '').trim().toLowerCase()
     const pmQ = norm(collabPmQ)
@@ -475,7 +482,10 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
     }
 
     const lines = []
-    lines.push([`Month ${MONTHS[monthIndex]} ${planningYear}`, ...pmList].map(esc).join(','))
+    const title = (monthIndex === null || monthIndex === undefined)
+      ? `Annual ${planningYear}`
+      : `Month ${MONTHS[monthIndex]} ${planningYear}`
+    lines.push([title, ...pmList].map(esc).join(','))
 
     for (const an of analystList) {
       const row = [an]
@@ -499,7 +509,9 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `spark_collaboration_pm_analyst_${planningYear}_${String((monthIndex + 1)).padStart(2, '0')}.csv`
+    a.download = (monthIndex === null || monthIndex === undefined)
+      ? `spark_collaboration_pm_analyst_${planningYear}_annual.csv`
+      : `spark_collaboration_pm_analyst_${planningYear}_${String((monthIndex + 1)).padStart(2, '0')}.csv`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -908,11 +920,27 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
                 <div style={{ display: 'grid', gap: 10 }}>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ fontSize: 11, fontWeight: 950, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted }}>
-                      Month
+                      Period
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          onClick={() => setCollabPeriod('annual')}
+                          style={{
+                            padding: '6px 10px',
+                            borderRadius: 999,
+                            border: `1px solid ${collabPeriod === 'annual' ? 'rgba(99,102,241,0.55)' : C.border}`,
+                            background: collabPeriod === 'annual' ? 'rgba(99,102,241,0.10)' : 'var(--surface-0)',
+                            color: collabPeriod === 'annual' ? 'rgba(67,56,202,1)' : C.muted,
+                            fontWeight: 900,
+                            cursor: 'pointer',
+                            fontSize: 12,
+                          }}
+                          title="Aggregate across all months"
+                        >
+                          Annual
+                        </button>
                       {pmAnalystMatrix.months.map(mi => {
-                        const active = mi === pmAnalystMatrix.monthIndex
+                        const active = collabPeriod !== 'annual' && mi === pmAnalystMatrix.monthIndex
                         return (
                           <button
                             key={mi}
@@ -1059,7 +1087,10 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
                   })()}
 
                   <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.6 }}>
-                    Each cell lists projects where the PM and Analyst both have staffed hours in {MONTHS[pmAnalystMatrix.monthIndex]}.
+                    {pmAnalystMatrix.monthIndex === null
+                      ? `Each cell lists projects where the PM and Analyst both have staffed hours in ${planningYear}.`
+                      : `Each cell lists projects where the PM and Analyst both have staffed hours in ${MONTHS[pmAnalystMatrix.monthIndex]}.`
+                    }
                   </div>
                 </div>
               )}
