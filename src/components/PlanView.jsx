@@ -12,7 +12,15 @@ import { Card, CardHeader, CardBody, Pill, Mono } from './ui'
 import ProjectListManagerModal from './ProjectListManagerModal'
 import OrgRosterModal from './OrgRosterModal'
 import * as XLSX from 'xlsx'
-import { PROJECT_LIST_COLUMN_MAP } from '../engine/schema.js'
+import {
+  PROJECT_LIST_COLUMN_MAP,
+  LM_BUCKET_MULTIPLIERS,
+  ORBIT_VIBE_MULTIPLIERS,
+  NETWORK_TYPE_MULTIPLIERS,
+  NON_STANDARD_DATA_MULTIPLIERS,
+  NON_STANDARD_METRIC_MULTIPLIERS,
+  IVMS_CONFIGURATION_MULTIPLIERS,
+} from '../engine/schema.js'
 
 const C = {
   accent: 'var(--accent)',
@@ -35,6 +43,7 @@ export default function PlanView({
   onDismissPlanIssues,
   base,
   baseSummary,
+  bundledDefaultUpdate,
   datasetMode,
   onUseBase,
   onPromoteOverrideToBase,
@@ -68,8 +77,17 @@ export default function PlanView({
   const planName = datasetMode === 'base'
     ? (base?.sourceFileName || baseSummary?.fileName || 'Saved plan')
     : uploadedFileName || 'Uploaded plan'
-  const planDate = base?.savedAt
-    ? new Date(base.savedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  const planDateIso = (() => {
+    if (datasetMode !== 'base') return null
+    if (!base) return null
+    // For the bundled default, prefer the workbook's own "Modified" timestamp
+    // so the UI reflects when the default file was last updated (not when it was re-ingested).
+    if (isBundledDefault) return base?.ingest?.meta?.workbookModifiedAt || base?.ingest?.meta?.workbookCreatedAt || base?.savedAt || null
+    // For user-saved plans, show when this browser stored the current base dataset.
+    return base?.savedAt || null
+  })()
+  const planDate = planDateIso
+    ? new Date(planDateIso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
     : null
   const activeIngest = engineIngest?.projects ? engineIngest : base?.ingest
   const projectCount = activeIngest?.projects?.length || baseSummary?.totalProjects || 0
@@ -242,7 +260,9 @@ export default function PlanView({
   const templateWb = useMemo(() => {
     const wb = XLSX.utils.book_new()
 
-    const mandatoryOrder = [
+    // Template headers include optional Advanced multipliers flags (Dx/Tx + H/M/L),
+    // but SPARK can still run when they are missing (defaults applied).
+    const requiredOrder = [
       'id',
       'displayId',
       'rawName',
@@ -253,7 +273,6 @@ export default function PlanView({
       'analyticsStartDate',
       'deliveryDate',
       'orbit',
-      'networkType',
       'dxLMs',
       'txLMs',
       'totalLMs',
@@ -264,7 +283,15 @@ export default function PlanView({
       'analystUtilPct',
     ]
 
-    const orderedFields = mandatoryOrder.filter(f => Object.prototype.hasOwnProperty.call(PROJECT_LIST_COLUMN_MAP || {}, f))
+    const optionalAdvancedOrder = [
+      'networkType',        // Dx/Tx/Both
+      'nonStandardData',    // Low/Medium/High
+      'nonStandardMetric',  // Low/Medium/High
+      'ivmsConfiguration',  // Low/Medium/High
+    ]
+
+    const orderedFields = [...requiredOrder, ...optionalAdvancedOrder]
+      .filter(f => Object.prototype.hasOwnProperty.call(PROJECT_LIST_COLUMN_MAP || {}, f))
 
     const plHeaders = orderedFields
       .map(f => (PROJECT_LIST_COLUMN_MAP?.[f]?.[0] || null))
@@ -282,6 +309,9 @@ export default function PlanView({
       deliveryDate: 'Jun-26',
       orbit: 'A',
       networkType: 'Dx',
+      nonStandardData: 'Low',
+      nonStandardMetric: 'Low',
+      ivmsConfiguration: 'Low',
       dxLMs: 3000,
       txLMs: 2000,
       totalLMs: 5000,
@@ -309,7 +339,10 @@ export default function PlanView({
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(plAoa), 'Project List')
 
     // ── Summary sheet (mandatory columns) ───────────────────────────────
-    const plReqHeaders = plHeaders
+    const plReqHeaders = requiredOrder
+      .filter(f => Object.prototype.hasOwnProperty.call(PROJECT_LIST_COLUMN_MAP || {}, f))
+      .map(f => (PROJECT_LIST_COLUMN_MAP?.[f]?.[0] || null))
+      .filter(Boolean)
     const dmReqHeaders = [
       'VIBE Tag',
       'Role',
@@ -344,12 +377,19 @@ export default function PlanView({
       ['- Project End M1'],
       ['- Project End M1+'],
       [''],
+      ['Project List — optional columns (Advanced multipliers flags)'],
+      ['- Network Type (Dx | Tx | Both) (default Dx)'],
+      ['- Non-Standard Data (Low/Medium/High) (default Low)'],
+      ['- Non-Standard Metric (Low/Medium/High) (default Low)'],
+      ['- IVMS Configuration (Low/Medium/High) (default Low)'],
+      [''],
       ['Demand Base Matrix — mandatory columns (exact header names)'],
       ...dmReqHeaders.map(h => [`- ${h}`]),
       [''],
       ['Notes'],
       ['- Orbit×VIBE multipliers must be provided in columns Y/Z/AA of Demand Base Matrix.'],
       ['- Project stage columns are NOT required. If you provide them, they act as PM phase-hour overrides; otherwise PM hours are derived from the Demand Base Matrix.'],
+      ['- Advanced multipliers flags are optional. If omitted, SPARK assumes Dx + Low/Low/Low.'],
       ['- CS&T Cluster is not required for engine insights/calculation, so it is not included in this template.'],
     ]
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryAoa), 'Summary')
@@ -396,17 +436,55 @@ export default function PlanView({
     // Provide the full 4×4 grid so CSM calculations have all keys.
     const ORBITS = ['A', 'B', 'C', 'D']
     const VIBES = ['Bond', 'Validate', 'Integrate', 'Explore']
-    let multBase = 1.2
     for (const vibe of VIBES) {
       for (const orbit of ORBITS) {
         const row = makeRow(['', '', '', '', '', '', '', '', ''])
         row[24] = vibe
         row[25] = orbit
-        row[26] = +(multBase.toFixed(2))
-        multBase += 0.05
+        const key = `${orbit}_${vibe}`
+        row[26] = Number.isFinite(+ORBIT_VIBE_MULTIPLIERS?.[key]) ? +ORBIT_VIBE_MULTIPLIERS[key] : 1
         dmAoa.push(row)
       }
     }
+
+    // Advanced multipliers reference table (not used directly by ingest; shown for planners)
+    // Place it away from VIBE Tag/Role columns to avoid any accidental parsing.
+    const advTitle = new Array(27).fill('')
+    advTitle[10] = 'Advanced multipliers (reference)'
+    dmAoa.push(advTitle)
+
+    const advHeader = new Array(27).fill('')
+    advHeader[10] = 'LMs'
+    advHeader[11] = 'Multiplier'
+    advHeader[12] = 'Dx/Tx'
+    advHeader[13] = 'Multiplier'
+    advHeader[14] = 'Non-Standard Data'
+    advHeader[15] = 'Multiplier'
+    advHeader[16] = 'Non-Standard Metric'
+    advHeader[17] = 'Multiplier'
+    advHeader[18] = 'IVMS Configuration'
+    advHeader[19] = 'Multiplier'
+    dmAoa.push(advHeader)
+
+    const lmRows = Array.isArray(LM_BUCKET_MULTIPLIERS) ? LM_BUCKET_MULTIPLIERS : []
+    const netRows = Object.entries(NETWORK_TYPE_MULTIPLIERS || {})
+    const levelOrder = ['High', 'Medium', 'Low']
+    const maxRows = Math.max(lmRows.length || 0, netRows.length || 0, levelOrder.length || 0, 5)
+    for (let i = 0; i < maxRows; i++) {
+      const r = new Array(27).fill('')
+      const lm = lmRows[i]
+      if (lm) { r[10] = lm.maxLMs; r[11] = lm.multiplier }
+      const net = netRows[i]
+      if (net) { r[12] = net[0]; r[13] = net[1] }
+      const lvl = levelOrder[i]
+      if (lvl) {
+        r[14] = lvl; r[15] = NON_STANDARD_DATA_MULTIPLIERS?.[lvl] ?? ''
+        r[16] = lvl; r[17] = NON_STANDARD_METRIC_MULTIPLIERS?.[lvl] ?? ''
+        r[18] = lvl; r[19] = IVMS_CONFIGURATION_MULTIPLIERS?.[lvl] ?? ''
+      }
+      dmAoa.push(r)
+    }
+
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dmAoa), 'Demand Base Matrix')
 
     return wb
@@ -643,6 +721,26 @@ export default function PlanView({
             <Pill type="green">Loaded</Pill>
           </CardHeader>
           <CardBody>
+            {datasetMode === 'base' && isBundledDefault && bundledDefaultUpdate?.available ? (
+              <div style={{ marginBottom: 14, padding: 12, borderRadius: 12, border: '1px solid rgba(59,130,246,0.35)', background: 'rgba(59,130,246,0.06)' }}>
+                <div style={{ fontWeight: 900, color: C.ink, marginBottom: 4 }}>New default workbook available</div>
+                <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6 }}>
+                  A newer SPARK default plan has been published{bundledDefaultUpdate?.lastModified ? ` (server: ${new Date(bundledDefaultUpdate.lastModified).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}).` : '.'}
+                  Click update to reload the latest default into your saved plan.
+                </div>
+                <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <button
+                    onClick={() => onResetToBundledDefaultPlan?.({ note: 'User updated to latest bundled default plan' })}
+                    style={{ padding: '10px 12px', borderRadius: 12, border: '1px solid transparent', background: 'var(--accent)', color: 'white', fontWeight: 900, cursor: 'pointer' }}
+                  >
+                    Update to latest default
+                  </button>
+                  <div style={{ fontSize: 11.5, color: C.faint }}>
+                    Your local edits to the default plan will be replaced. Scenarios are unchanged.
+                  </div>
+                </div>
+              </div>
+            ) : null}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
                 <Stat label="Source" value={planName} mono />

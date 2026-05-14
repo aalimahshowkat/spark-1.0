@@ -21,6 +21,7 @@ import { runCalculations } from '../engine/calculate.js'
 import { Card, CardHeader, CardBody, Tag, Pill, AlertBar, KpiStrip, KpiCard } from './ui.jsx'
 import { CHART_COLORS } from '../lib/chartSetup.js'
 import NumericField from './NumericField.jsx'
+import AdvancedMultipliersEditor from './AdvancedMultipliersEditor.jsx'
 import { computeRosterWorkingDaysByMonth } from '../engine/workingDays.js'
 
 // ─── Palette shortcuts ─────────────────────────────────────────────────────
@@ -564,6 +565,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
   const [orbit, setOrbit] = useState('A')
   const [totalLMs, setTotalLMs] = useState(0)
   const [analystUtilPct, setAnalystUtilPct] = useState(70)
+  const [networkType, setNetworkType] = useState('Distribution (Dx)')
+  const [nonStandardData, setNonStandardData] = useState('Low')
+  const [nonStandardMetric, setNonStandardMetric] = useState('Low')
+  const [ivmsConfiguration, setIvmsConfiguration] = useState('Low')
   const [assignedCSM, setAssignedCSM] = useState('')
   const [assignedPM, setAssignedPM] = useState('')
   const [assignedAnalyst1, setAssignedAnalyst1] = useState('')
@@ -616,6 +621,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
         orbit: String(orbit || 'A').trim().toUpperCase(),
         totalLMs: Number.isFinite(lm) ? lm : 0,
         lmMultiplier: deriveLm(lm),
+        networkType: String(networkType || 'Distribution (Dx)').trim() || 'Distribution (Dx)',
+        nonStandardData: String(nonStandardData || 'Low').trim() || 'Low',
+        nonStandardMetric: String(nonStandardMetric || 'Low').trim() || 'Low',
+        ivmsConfiguration: String(ivmsConfiguration || 'Low').trim() || 'Low',
         analystUtilPct: Number.isFinite(pct) ? pct : 70,
         startDate,
         deliveryDate,
@@ -801,6 +810,10 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
       orbit: String(orbit || 'A').trim().toUpperCase(),
       totalLMs: Number.isFinite(lm) ? lm : 0,
       lmMultiplier: deriveLm(lm),
+      networkType: String(networkType || 'Distribution (Dx)').trim() || 'Distribution (Dx)',
+      nonStandardData: String(nonStandardData || 'Low').trim() || 'Low',
+      nonStandardMetric: String(nonStandardMetric || 'Low').trim() || 'Low',
+      ivmsConfiguration: String(ivmsConfiguration || 'Low').trim() || 'Low',
       analystUtilPct: Number.isFinite(pct) ? pct : 70,
       startDate,
       deliveryDate,
@@ -885,6 +898,34 @@ function AddScenarioProjectModal({ planningYear = 2026, rosterByRole = {}, basel
                 {['A', 'B', 'C', 'D'].map(o => <option key={o} value={o}>{o}</option>)}
               </select>
             </FieldGroup>
+          </div>
+
+          <div style={{ marginTop: 12, padding: 12, borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface1 }}>
+            <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted, marginBottom: 10 }}>
+              Advanced multipliers (defaults: Dx + Low)
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <FieldGroup label="Network type (Dx/Tx)">
+                <select value={networkType} onChange={(e) => setNetworkType(e.target.value)} style={inputStyle()}>
+                  {['Distribution (Dx)', 'Transmission (Tx)', 'Both (Dx & Tx)'].map(x => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </FieldGroup>
+              <FieldGroup label="Non-standard data">
+                <select value={nonStandardData} onChange={(e) => setNonStandardData(e.target.value)} style={inputStyle()}>
+                  {['Low', 'Medium', 'High'].map(x => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </FieldGroup>
+              <FieldGroup label="Non-standard metric">
+                <select value={nonStandardMetric} onChange={(e) => setNonStandardMetric(e.target.value)} style={inputStyle()}>
+                  {['Low', 'Medium', 'High'].map(x => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </FieldGroup>
+              <FieldGroup label="IVMS configuration">
+                <select value={ivmsConfiguration} onChange={(e) => setIvmsConfiguration(e.target.value)} style={inputStyle()}>
+                  {['Low', 'Medium', 'High'].map(x => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </FieldGroup>
+            </div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
@@ -1649,25 +1690,26 @@ function AssumptionOverridesTab({ overrides, onPatch, baselineIngest, baselineCa
         </Card>
       </details>
 
-      {/* PM multipliers (task table; scenario-only) */}
+      {/* Advanced multipliers (scenario-only) */}
       <details style={{ marginTop: 14 }} open={false}>
         <summary style={{ listStyle: 'none', cursor: 'pointer' }}>
           <Card>
-            <CardHeader title="PM multipliers (scenario-only)">
-              <Tag>PM demand drivers</Tag>
+            <CardHeader title="Advanced multipliers (scenario-only)">
+              <Tag>PM reconstruction</Tag>
             </CardHeader>
           </Card>
         </summary>
         <Card style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, borderTop: 'none' }}>
           <CardBody>
             <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.6, marginBottom: 12 }}>
-              Edit the workbook’s <strong>task-level PM table</strong> (Customer journey stage → Stage → PM → phase hours) for this scenario only.
-              Changes are aggregated into PM base-hours and applied to all projects by their <strong>VIBE tag</strong>, then recalculated through utilization/risks.
+              Reconstruct PM stage-hours when your workbook does not include PM stage columns on <strong>Project List</strong>.
+              You can override the multiplier tables and/or set per-project flags for this scenario only.
             </div>
-            <PmTaskMultipliersEditor
-              baselineTasks={baselineIngest?.demandTasks || []}
-              value={overrides?.pmTaskMultipliers || null}
-              onChange={(next) => onPatch({ pmTaskMultipliers: next || undefined })}
+            <AdvancedMultipliersEditor
+              projects={baselineIngest?.projects || []}
+              value={overrides?.advancedMultipliers || null}
+              onChange={(next) => onPatch({ advancedMultipliers: next || undefined })}
+              mode="scenario"
             />
           </CardBody>
         </Card>
@@ -2290,181 +2332,6 @@ function AssignmentBackfillsDeltaEditor({
           </table>
         </div>
       )}
-    </div>
-  )
-}
-
-function PmTaskMultipliersEditor({ baselineTasks = [], value, onChange }) {
-  const PM_PHASES = useMemo(() => ([
-    'Project Start M0',
-    'Project Start M1',
-    'Project Mid',
-    'Project End M-1',
-    'Project End M0',
-    'Project End M1',
-    'Project End M1+',
-  ]), [])
-
-  const pmRows = useMemo(() => {
-    return (Array.isArray(baselineTasks) ? baselineTasks : [])
-      .filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
-      .map(r => ({
-        stage: String(r?.stage || '').trim(),       // customer journey stage
-        taskStage: String(r?.taskStage || '').trim(),
-        phaseHours: r?.phaseHours || {},
-      }))
-      .filter(r => r.stage && r.taskStage)
-  }, [baselineTasks])
-
-  const stages = useMemo(() => {
-    const set = new Set(pmRows.map(r => r.stage))
-    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))]
-  }, [pmRows])
-
-  const [stageFilter, setStageFilter] = useState('All')
-  const [taskFilter, setTaskFilter] = useState('All')
-
-  const taskStages = useMemo(() => {
-    const filtered = stageFilter === 'All' ? pmRows : pmRows.filter(r => r.stage === stageFilter)
-    const set = new Set(filtered.map(r => r.taskStage))
-    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))]
-  }, [pmRows, stageFilter])
-
-  useEffect(() => {
-    if (!taskStages.includes(taskFilter)) setTaskFilter('All')
-  }, [taskStages]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const overridesByKey = (value && typeof value === 'object' ? value?.overridesByKey : null) || {}
-  const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
-
-  const effectiveRows = useMemo(() => {
-    const filtered = pmRows.filter(r => (
-      (stageFilter === 'All' || r.stage === stageFilter) &&
-      (taskFilter === 'All' || r.taskStage === taskFilter)
-    ))
-    return filtered
-      .slice()
-      .sort((a, b) => (a.stage !== b.stage ? a.stage.localeCompare(b.stage) : a.taskStage.localeCompare(b.taskStage)))
-  }, [pmRows, stageFilter, taskFilter])
-
-  const setOverride = (stage, taskStage, phase, nextVal) => {
-    const key = normKey(stage, taskStage)
-    const next = { ...(overridesByKey || {}) }
-    const row = { ...(next[key] || {}) }
-    if (nextVal === null) delete row[phase]
-    else row[phase] = nextVal
-    if (Object.keys(row).length) next[key] = row
-    else delete next[key]
-    onChange?.(Object.keys(next).length ? { overridesByKey: next } : null)
-  }
-
-  if (!pmRows.length) {
-    return (
-      <div style={{ fontSize: 12.5, color: C.faint, lineHeight: 1.6 }}>
-        This workbook doesn’t include the task-level “Customer Journey Stage / Stage / Role” section in <strong>Demand Base Matrix</strong>,
-        so scenario-only PM multipliers can’t be edited.
-      </div>
-    )
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>
-            Customer journey stage
-          </div>
-          <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} style={{ ...inputStyle(), height: 40, minWidth: 220 }}>
-            {stages.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <div>
-          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: C.muted, marginBottom: 6 }}>
-            Stage
-          </div>
-          <select value={taskFilter} onChange={(e) => setTaskFilter(e.target.value)} style={{ ...inputStyle(), height: 40, minWidth: 320 }}>
-            {taskStages.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        {!!Object.keys(overridesByKey || {}).length && (
-          <button onClick={() => onChange?.(null)} style={{ ...btnStyle('danger-sm'), marginLeft: 'auto' }}>
-            Reset PM multipliers
-          </button>
-        )}
-      </div>
-
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <thead>
-            <tr style={{ background: 'var(--surface-1)' }}>
-              {['Customer journey', 'Stage', 'Role', ...PM_PHASES].map(h => (
-                <th
-                  key={h}
-                  style={{
-                    padding: '9px 10px',
-                    textAlign: 'left',
-                    fontSize: 10.5,
-                    fontWeight: 800,
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.6px',
-                    color: C.muted,
-                    borderBottom: `1px solid ${C.border}`,
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {effectiveRows.map((r, idx) => {
-              const key = normKey(r.stage, r.taskStage)
-              const ov = overridesByKey?.[key] || null
-              return (
-                <tr key={key} style={{ background: idx % 2 ? 'var(--surface-1)' : C.surface, borderBottom: `1px solid ${C.border}` }}>
-                  <td style={{ padding: '8px 10px', fontWeight: 750, color: C.ink, whiteSpace: 'nowrap' }}>{r.stage}</td>
-                  <td style={{ padding: '8px 10px', color: C.muted, minWidth: 260 }}>{r.taskStage}</td>
-                  <td style={{ padding: '8px 10px', fontFamily: 'var(--font-mono)', color: C.faint }}>PM</td>
-                  {PM_PHASES.map(ph => {
-                    const base = Number(r.phaseHours?.[ph] || 0)
-                    const has = ov && ov[ph] !== undefined && ov[ph] !== null
-                    const eff = has ? Number(ov[ph]) : base
-                    const changed = has && Number.isFinite(eff) && eff !== base
-                    return (
-                      <td key={ph} style={{ padding: '6px 10px' }}>
-                        <input
-                          type="number"
-                          value={Number.isFinite(eff) ? eff : ''}
-                          onChange={(e) => {
-                            const raw = e.target.value
-                            if (raw === '') return setOverride(r.stage, r.taskStage, ph, null)
-                            const n = Number(raw)
-                            if (!Number.isFinite(n)) return
-                            setOverride(r.stage, r.taskStage, ph, n)
-                          }}
-                          style={{
-                            ...inputStyle({ width: 120 }),
-                            height: 36,
-                            fontFamily: 'var(--font-mono)',
-                            borderColor: changed ? 'rgba(167,139,250,0.55)' : C.border,
-                            background: changed ? 'rgba(167,139,250,0.08)' : C.surface,
-                          }}
-                        />
-                        {changed && (
-                          <div style={{ marginTop: 4, fontSize: 10.5, color: C.faint }}>
-                            baseline {base}
-                          </div>
-                        )}
-                      </td>
-                    )
-                  })}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
     </div>
   )
 }

@@ -122,12 +122,10 @@ export async function validateSparkWorkbookFile(file) {
   // Required for correct engine math & attribution.
   // Note: although ingest can infer orbit if column is absent, UX requires an explicit Orbit column.
   const requiredProjectFields = [
-    'id',
     'rawName',
     'vibeType',
     'startDate',
     'deliveryDate',
-    'status',
     'orbit',
     'networkType',
     // Analyst splitting (missing column defaults to 0 → shifts load to Analyst 2).
@@ -140,6 +138,11 @@ export async function validateSparkWorkbookFile(file) {
     'assignedAnalyst1',
     'assignedAnalyst2',
   ]
+
+  // These are helpful for parity/traceability, but the engine can safely default them:
+  // - id: ingest will generate a stable id from the project name
+  // - status: ingest defaults to "Open"
+  const optionalButRecommendedProjectFields = ['id', 'status']
 
   const requireAny = [
     { group: 'LMs', sheet: 'Project List', any: ['totalLMs', 'dxLMs', 'txLMs'] },
@@ -155,6 +158,20 @@ export async function validateSparkWorkbookFile(file) {
         field,
         expected: candidates,
         message: `Missing required column for ${field} in "Project List".`,
+      })
+    }
+  }
+
+  for (const field of optionalButRecommendedProjectFields) {
+    const candidates = PROJECT_LIST_COLUMN_MAP[field] || []
+    if (!hasAnyKey(plKeys, candidates)) {
+      issues.push({
+        severity: 'warning',
+        kind: 'missing_column',
+        sheet: 'Project List',
+        field,
+        expected: candidates,
+        message: `Missing recommended column for ${field} in "Project List". SPARK will default it automatically.`,
       })
     }
   }

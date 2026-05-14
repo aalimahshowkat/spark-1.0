@@ -69,6 +69,10 @@ import {
   UNSTAFFED_PERSON_NAMES,
   PRIMARY_ROLES,
   LM_BUCKET_MULTIPLIERS,
+  NETWORK_TYPE_MULTIPLIERS,
+  NON_STANDARD_DATA_MULTIPLIERS,
+  NON_STANDARD_METRIC_MULTIPLIERS,
+  IVMS_CONFIGURATION_MULTIPLIERS,
 } from './schema.js'
 import { computeRosterWorkingDaysByMonth, computeRosterAvailabilityAdjustmentsByMonth } from './workingDays.js'
 
@@ -135,47 +139,9 @@ export function runCalculations(projects, demandMatrix, orbitMultipliers = {}, p
   }
 
   const applyPmTaskMultipliers = (projectsIn) => {
-    const pm = capacityConfig?.pmTaskMultipliers
-    if (!pm || typeof pm !== 'object') return projectsIn
-    const demandTasks = options?.demandTasks
-    if (!Array.isArray(demandTasks) || demandTasks.length === 0) return projectsIn
-
-    const overrides = pm?.overridesByKey || {}
-    const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
-    const phases = ['Project Start M0','Project Start M1','Project Mid','Project End M-1','Project End M0','Project End M1','Project End M1+']
-
-    const basePmRows = demandTasks.filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
-    if (basePmRows.length === 0) return projectsIn
-
-    const totalsByStage = new Map()
-    for (const r of basePmRows) {
-      const stage = String(r?.stage || '').trim()
-      const taskStage = String(r?.taskStage || '').trim()
-      if (!stage || !taskStage) continue
-      const key = normKey(stage, taskStage)
-      const ov = overrides?.[key]
-      const ph = { ...(r.phaseHours || {}) }
-      if (ov && typeof ov === 'object') {
-        for (const k of phases) {
-          if (ov[k] !== undefined && ov[k] !== null && Number.isFinite(+ov[k])) ph[k] = +ov[k]
-        }
-      }
-      if (!totalsByStage.has(stage)) {
-        const init = {}
-        for (const k of phases) init[k] = 0
-        totalsByStage.set(stage, init)
-      }
-      const tgt = totalsByStage.get(stage)
-      for (const k of phases) tgt[k] += (parseFloat(ph?.[k]) || 0)
-    }
-
-    if (totalsByStage.size === 0) return projectsIn
-    return (Array.isArray(projectsIn) ? projectsIn : []).map(p => {
-      const st = String(p?.vibeType || '').trim()
-      const ph = totalsByStage.get(st)
-      if (!ph) return p
-      return { ...p, phaseHours: { ...ph } }
-    })
+    // PM multipliers UI has been replaced by "Advanced multipliers".
+    // We no longer override PM phase hours at this stage.
+    return projectsIn
   }
 
   // Build a fast lookup index from demand matrix rows
@@ -194,7 +160,7 @@ export function runCalculations(projects, demandMatrix, orbitMultipliers = {}, p
 
     for (const role of ALL_ROLES) {
       const roleAssignments = computeProjectRoleAssignments(
-        project, role, matrixIndex, orbitMultipliersEffective, planningYear
+        project, role, matrixIndex, orbitMultipliersEffective, planningYear, capacityConfig
       )
       assignments.push(...roleAssignments)
     }
@@ -594,10 +560,53 @@ function getProjectPhaseHours(project, phase) {
   return parseFloat(obj[phase]) || 0
 }
 
+function normalizeLevel(s) {
+  const v = String(s || '').trim().toLowerCase()
+  if (!v || v === '-' || v === 'na' || v === 'n/a') return null
+  if (v === 'low') return 'Low'
+  if (v === 'medium' || v === 'med') return 'Medium'
+  if (v === 'high') return 'High'
+  return null
+}
+
+function computeAdvancedPmMultiplier(project, capacityConfig = null) {
+  const cfg = capacityConfig?.advancedMultipliers || null
+  const ovr = cfg?.projectOverrides?.[project?.id] || null
+
+  // Defaults when the user/workbook doesn't provide flags:
+  // - Network type defaults to Dx
+  // - Complexity levels default to Low
+  const networkTypeRaw = String(ovr?.networkType ?? project?.networkType ?? '').trim()
+  const networkType = networkTypeRaw || 'Distribution (Dx)'
+  const nsData = normalizeLevel(ovr?.nonStandardData ?? project?.nonStandardData) || 'Low'
+  const nsMetric = normalizeLevel(ovr?.nonStandardMetric ?? project?.nonStandardMetric) || 'Low'
+  const ivms = normalizeLevel(ovr?.ivmsConfiguration ?? project?.ivmsConfiguration) || 'Low'
+
+  const netTable = { ...(NETWORK_TYPE_MULTIPLIERS || {}), ...((cfg?.networkTypeMultipliers && typeof cfg.networkTypeMultipliers === 'object') ? cfg.networkTypeMultipliers : {}) }
+  const nsdTable = { ...(NON_STANDARD_DATA_MULTIPLIERS || {}), ...((cfg?.nonStandardDataMultipliers && typeof cfg.nonStandardDataMultipliers === 'object') ? cfg.nonStandardDataMultipliers : {}) }
+  const nsmTable = { ...(NON_STANDARD_METRIC_MULTIPLIERS || {}), ...((cfg?.nonStandardMetricMultipliers && typeof cfg.nonStandardMetricMultipliers === 'object') ? cfg.nonStandardMetricMultipliers : {}) }
+  const ivmsTable = { ...(IVMS_CONFIGURATION_MULTIPLIERS || {}), ...((cfg?.ivmsConfigurationMultipliers && typeof cfg.ivmsConfigurationMultipliers === 'object') ? cfg.ivmsConfigurationMultipliers : {}) }
+
+  const lm = Number(project?.lmMultiplier)
+  const lmMult = Number.isFinite(lm) && lm > 0 ? lm : 1
+  const netMult = Number(netTable?.[networkType] ?? 1)
+  const nsdMult = Number(nsdTable?.[nsData] ?? 1)
+  const nsmMult = Number(nsmTable?.[nsMetric] ?? 1)
+  const ivmsMult = Number(ivmsTable?.[ivms] ?? 1)
+
+  const mult = (Number.isFinite(netMult) ? netMult : 1) *
+    (Number.isFinite(nsdMult) ? nsdMult : 1) *
+    (Number.isFinite(nsmMult) ? nsmMult : 1) *
+    (Number.isFinite(ivmsMult) ? ivmsMult : 1) *
+    lmMult
+
+  return Number.isFinite(mult) && mult > 0 ? mult : 1
+}
+
 // PM hours historically came from Project List stage columns (phaseHours).
 // To support workbooks that omit those columns, we fall back to Demand Matrix
 // hours when the project has no meaningful phaseHours populated.
-function getPmBaseHours(project, phase, matrixIndex, vibeType) {
+function getPmBaseHours(project, phase, matrixIndex, vibeType, capacityConfig = null) {
   if (!phase || phase === PHASE_NA) return 0
   const obj = project?.phaseHours || null
   if (obj && typeof obj === 'object') {
@@ -607,8 +616,11 @@ function getPmBaseHours(project, phase, matrixIndex, vibeType) {
       return getProjectPhaseHours(project, phase)
     }
   }
-  // Default behavior: derive PM hours from the Demand Matrix (or schema fallback).
-  return lookupBaseHours(matrixIndex, vibeType, 'PM', phase)
+  // Default behavior: derive PM hours from the Demand Matrix (or schema fallback),
+  // then apply the "advanced multipliers" product (LM bucket + Dx/Tx + Non-standard + IVMS).
+  const base = lookupBaseHours(matrixIndex, vibeType, 'PM', phase)
+  const mult = computeAdvancedPmMultiplier(project, capacityConfig)
+  return base * mult
 }
 
 function getDeliveryDayOfMonth(project) {
@@ -649,7 +661,7 @@ function safeNum(n) {
  * Compute all assignment rows for a single project × role combination.
  * Returns one row per month (12 rows, some with 0 hours).
  */
-function computeProjectRoleAssignments(project, role, matrixIndex, orbitMultipliers, planningYear) {
+function computeProjectRoleAssignments(project, role, matrixIndex, orbitMultipliers, planningYear, capacityConfig = null) {
   const normRole  = normalizeRole(role)
   const vibeType  = project.vibeType
   const casesByYear = computeAllCaseColumns(project, planningYear)
@@ -692,7 +704,7 @@ function computeProjectRoleAssignments(project, role, matrixIndex, orbitMultipli
     if (normRole === 'PM') {
       if (vibeType !== 'Validate' && case1 === 'Project End M-1') {
         driverPhase = case1
-        const base = getPmBaseHours(project, case1, matrixIndex, vibeType)
+        const base = getPmBaseHours(project, case1, matrixIndex, vibeType, capacityConfig)
         const denom = Math.max(1, case1EndMinus1Count)
         qHours = (base / denom) * usagePct
         debug = {
@@ -704,7 +716,7 @@ function computeProjectRoleAssignments(project, role, matrixIndex, orbitMultipli
         }
       } else {
         driverPhase = case2
-        const base = getPmBaseHours(project, case2, matrixIndex, vibeType)
+        const base = getPmBaseHours(project, case2, matrixIndex, vibeType, capacityConfig)
         qHours = base * usagePct
         debug = {
           ...debug,

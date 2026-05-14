@@ -18,7 +18,6 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
   const demandRef = useRef(null)
   const utilRef = useRef(null)
   const vibeRef = useRef(null)
-  const statusRef = useRef(null)
   const vibeStackRef = useRef(null)
 
   // IMPORTANT: In engine mode, `viewData` is async. Avoid computing any derived values
@@ -76,7 +75,6 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
     demand,
     vibeMonthly,
     vibeProjectCounts,
-    statusCounts,
     MONTHS,
     RAW_CAP,
     annualDemand,
@@ -93,7 +91,6 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
   const monthsOverSafe = monthsOver || { CSM: 0, PM: 0, Analyst: 0 }
   const annualDemandSafe = annualDemand || { CSM: 0, PM: 0, Analyst: 0 }
   const vibeProjectCountsSafe = vibeProjectCounts || { Bond: 0, Validate: 0, Integrate: 0, Explore: 0 }
-  const statusCountsSafe = statusCounts || {}
   const vibeMonthlySafe = vibeMonthly || { Bond: new Array(12).fill(0), Validate: new Array(12).fill(0), Integrate: new Array(12).fill(0), Explore: new Array(12).fill(0) }
 
   const effCapByMonth = {
@@ -191,12 +188,12 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
     datasets: [{ data: vibeLabels.map(k => vibeProjectCountsSafe[k]), backgroundColor: vibeLabels.map(k => CHART_COLORS[k] || '#888'), borderWidth:0 }]
   }
 
-  // Status doughnut
-  const statusLabels = Object.keys(statusCountsSafe)
-  const statusDoughnut = {
-    labels:   statusLabels.map(k => `${k} (${statusCountsSafe[k]})`),
-    datasets: [{ data: statusLabels.map(k => statusCountsSafe[k]), backgroundColor:['#e8eef8','#fdf3e3','#e3f2eb'], borderColor:['#2857a4','#c47b1a','#2a7a52'], borderWidth:2 }]
-  }
+  const topVibe = (() => {
+    const entries = Object.entries(vibeProjectCountsSafe || {})
+      .filter(([, v]) => Number.isFinite(+v) && +v > 0)
+      .sort((a, b) => (+b[1] || 0) - (+a[1] || 0))
+    return entries[0]?.[0] || '—'
+  })()
 
   // VIBE stacked monthly
   const vibeStackedData = {
@@ -244,7 +241,14 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
       </AlertBar>
 
       <KpiStrip cols={5}>
-        <KpiCard label="Total Projects"      value={totalProjects}           sub={`${statusCountsSafe['In Progress'] || 0} in-progress`}  badge="Pipeline growing" badgeType="amber" accent="blue" />
+        <KpiCard
+          label="Total Projects"
+          value={totalProjects}
+          sub={topVibe !== '—' ? `Most are ${topVibe}` : '—'}
+          badge="Portfolio"
+          badgeType="blue"
+          accent="blue"
+        />
         <KpiCard label="CSM Utilization"     value={annualUtil('CSM')}       sub="vs 80% effective cap"  badge={`${monthsOverSafe.CSM} months over`}     badgeType="red"   accent="red"   />
         <KpiCard label="PM Utilization"      value={annualUtil('PM')}        sub="vs 80% effective cap"  badge={`${monthsOverSafe.PM} months over`}      badgeType="amber" accent="amber" />
         <KpiCard
@@ -327,7 +331,7 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
         </Card>
       </Grid>
 
-      <Grid cols="1fr 1fr 1fr">
+      <Grid cols="1fr 1fr">
         <Card>
           <CardHeader title="VIBE Type Mix" tag="Projects">
             <ActionButton onClick={() => exportChartPng(vibeRef, 'SPARK_Insights_Overview_VIBE_Mix.png')}>
@@ -337,22 +341,6 @@ export default function ExecutiveView({ data, uploadedFile, source = 'excel', on
           <CardBody>
             <ChartBox height={200}>
               <Doughnut ref={vibeRef} data={vibeDoughnut} options={{
-                cutout:'65%', responsive:true, maintainAspectRatio:false,
-                plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8, font:{size:11} } } }
-              }} />
-            </ChartBox>
-          </CardBody>
-        </Card>
-
-        <Card>
-          <CardHeader title="Project Status" tag="Pipeline">
-            <ActionButton onClick={() => exportChartPng(statusRef, 'SPARK_Insights_Overview_Status.png')}>
-              Export PNG
-            </ActionButton>
-          </CardHeader>
-          <CardBody>
-            <ChartBox height={200}>
-              <Doughnut ref={statusRef} data={statusDoughnut} options={{
                 cutout:'65%', responsive:true, maintainAspectRatio:false,
                 plugins:{ legend:{ position:'bottom', labels:{ usePointStyle:true, boxWidth:8, font:{size:11} } } }
               }} />

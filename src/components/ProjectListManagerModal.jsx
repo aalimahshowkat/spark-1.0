@@ -5,6 +5,8 @@ import NumericField from './NumericField.jsx'
 
 const ORBITS = ['', 'A', 'B', 'C', 'D']
 const STATUSES = ['Open', 'In Progress', 'Done']
+const NETWORK_TYPES = ['Distribution (Dx)', 'Transmission (Tx)', 'Both (Dx & Tx)']
+const COMPLEXITY_LEVELS = ['Low', 'Medium', 'High']
 
 function safeText(s) {
   return String(s || '').trim()
@@ -128,6 +130,10 @@ export default function ProjectListManagerModal({
       vibeType: safeText(p.vibeType) || 'Bond',
       status: safeText(p.status) || 'Open',
       orbit: safeText(p.orbit),
+      networkType: safeText(p.networkType) || 'Distribution (Dx)',
+      nonStandardData: safeText(p.nonStandardData) || 'Low',
+      nonStandardMetric: safeText(p.nonStandardMetric) || 'Low',
+      ivmsConfiguration: safeText(p.ivmsConfiguration) || 'Low',
       startDate: p.startDate instanceof Date ? p.startDate : null,
       deliveryDate: p.deliveryDate instanceof Date ? p.deliveryDate : null,
       analyticsStartDate: p.analyticsStartDate instanceof Date ? p.analyticsStartDate : null,
@@ -154,6 +160,10 @@ export default function ProjectListManagerModal({
       vibeType: 'Bond',
       status: 'Open',
       orbit: '',
+      networkType: 'Distribution (Dx)',
+      nonStandardData: 'Low',
+      nonStandardMetric: 'Low',
+      ivmsConfiguration: 'Low',
       startDate: null,
       deliveryDate: null,
       analyticsStartDate: null,
@@ -191,6 +201,10 @@ export default function ProjectListManagerModal({
       vibeType: draft.vibeType,
       status: draft.status,
       orbit: safeText(draft.orbit) || null,
+      networkType: safeText(draft.networkType) || 'Distribution (Dx)',
+      nonStandardData: safeText(draft.nonStandardData) || 'Low',
+      nonStandardMetric: safeText(draft.nonStandardMetric) || 'Low',
+      ivmsConfiguration: safeText(draft.ivmsConfiguration) || 'Low',
       startDate: draft.startDate,
       deliveryDate: draft.deliveryDate,
       analyticsStartDate: draft.analyticsStartDate,
@@ -513,6 +527,26 @@ export default function ProjectListManagerModal({
                   <Field label="Orbit">
                     <select value={draft.orbit} onChange={e => setDraft({ ...draft, orbit: e.target.value })} style={inputStyle}>
                       {ORBITS.map(o => <option key={o || 'blank'} value={o}>{o || '—'}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Network type (Dx/Tx)">
+                    <select value={draft.networkType} onChange={e => setDraft({ ...draft, networkType: e.target.value })} style={inputStyle}>
+                      {NETWORK_TYPES.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Non-standard data">
+                    <select value={draft.nonStandardData} onChange={e => setDraft({ ...draft, nonStandardData: e.target.value })} style={inputStyle}>
+                      {COMPLEXITY_LEVELS.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Non-standard metric">
+                    <select value={draft.nonStandardMetric} onChange={e => setDraft({ ...draft, nonStandardMetric: e.target.value })} style={inputStyle}>
+                      {COMPLEXITY_LEVELS.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="IVMS configuration">
+                    <select value={draft.ivmsConfiguration} onChange={e => setDraft({ ...draft, ivmsConfiguration: e.target.value })} style={inputStyle}>
+                      {COMPLEXITY_LEVELS.map(o => <option key={o} value={o}>{o}</option>)}
                     </select>
                   </Field>
                   <Field label="LMs">

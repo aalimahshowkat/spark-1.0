@@ -26,6 +26,10 @@ import {
   LM_BUCKET_MULTIPLIERS,
 } from './schema.js'
 
+function safeText(s) {
+  return String(s || '').trim()
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // PUBLIC API
 // ─────────────────────────────────────────────────────────────────────────
@@ -64,6 +68,7 @@ export function ingestWorkbook(wb, metaIn = {}) {
   const rawProjects     = readSheet(wb, 'Project List')
   const rawDemandMatrix = readSheet(wb, 'Demand Base Matrix')
   const orbitMultipliers = extractOrbitMultipliers(wb)
+  const workbookAdvancedMultipliers = extractAdvancedMultipliersFromDemandBaseMatrix(wb)
 
   if (!rawProjects || rawProjects.length === 0) {
     throw new IngestError('Sheet "Project List" not found or is empty.')
@@ -79,6 +84,14 @@ export function ingestWorkbook(wb, metaIn = {}) {
   const quality        = runDataQualityChecks(projects)
   const roster         = seedRosterFromProjects(projects)
 
+  const props = wb?.Props || {}
+  const toIso = (d) => {
+    if (!d) return ''
+    if (d instanceof Date && !isNaN(d.getTime())) return d.toISOString()
+    const parsed = new Date(d)
+    return isNaN(parsed.getTime()) ? '' : parsed.toISOString()
+  }
+
   const meta = {
     fileName:       metaIn.fileName || '',
     fileSize:       metaIn.fileSize || 0,
@@ -88,6 +101,11 @@ export function ingestWorkbook(wb, metaIn = {}) {
     totalProjects:  projects.length,
     matrixRows:     demandMatrix.length,
     sheetsFound:    wb.SheetNames,
+    workbookCreatedAt:  toIso(props?.CreatedDate),
+    workbookModifiedAt: toIso(props?.ModifiedDate),
+    workbookAuthor:     safeText(props?.Author),
+    workbookLastAuthor: safeText(props?.LastAuthor),
+    workbookAdvancedMultipliers: workbookAdvancedMultipliers || null,
   }
 
   return { projects, demandMatrix, demandTasks, orbitMultipliers, quality, roster, meta }
@@ -210,6 +228,10 @@ function parseProjectRow(row, index, hasOrbitColumn) {
     const nonStandardData   = (getRaw('nonStandardData') ?? '').toString().trim()
     const nonStandardMetric = (getRaw('nonStandardMetric') ?? '').toString().trim()
     const ivmsConfiguration = (getRaw('ivmsConfiguration') ?? '').toString().trim()
+    const dxTxMultiplier = parseNum(get('dxTxMultiplier'))
+    const nonStandardDataMultiplier = parseNum(get('nonStandardDataMultiplier'))
+    const nonStandardMetricMultiplier = parseNum(get('nonStandardMetricMultiplier'))
+    const ivmsConfigurationMultiplier = parseNum(get('ivmsConfigurationMultiplier'))
 
     const phaseHours = {
       'Project Start M0': parseNum(get('phaseStartM0')),
@@ -307,6 +329,10 @@ function parseProjectRow(row, index, hasOrbitColumn) {
       nonStandardData,
       nonStandardMetric,
       ivmsConfiguration,
+      dxTxMultiplier,
+      nonStandardDataMultiplier,
+      nonStandardMetricMultiplier,
+      ivmsConfigurationMultiplier,
       orbit,
       orbitRaw,
       orbitSource,
@@ -378,6 +404,167 @@ function extractOrbitMultipliers(wb) {
   }
 
   return results
+}
+
+/**
+ * Optional: Extract Advanced multipliers weight tables from Demand Base Matrix.
+ *
+ * This enables planners to edit multiplier weights in Excel instead of (or in addition to)
+ * Advanced planning UI. UI overrides always win downstream (capacityConfig overrides).
+ *
+ * Expected layout: a header row containing these labels (case-insensitive):
+ *   - LMs, Multiplier
+ *   - Dx/Tx, Multiplier
+ *   - Non-Standard Data, Multiplier
+ *   - Non-Standard Metric, Multiplier
+ *   - IVMS Configuration, Multiplier
+ *
+ * Returns:
+ * {
+ *   lmBucketMultipliers?: Array<{maxLMs:number, multiplier:number}>,
+ *   advancedMultipliers?: {
+ *     networkTypeMultipliers?: { [networkType:string]: number },
+ *     nonStandardDataMultipliers?: { Low|Medium|High: number },
+ *     nonStandardMetricMultipliers?: { Low|Medium|High: number },
+ *     ivmsConfigurationMultipliers?: { Low|Medium|High: number },
+ *   }
+ * }
+ */
+function extractAdvancedMultipliersFromDemandBaseMatrix(wb) {
+  const sheet = wb.Sheets['Demand Base Matrix']
+  if (!sheet) return null
+
+  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
+  if (!Array.isArray(grid) || grid.length === 0) return null
+
+  const cellText = (v) => String(v ?? '').trim()
+  const norm = (v) => cellText(v).toLowerCase()
+  const rowHas = (row, token) => (row || []).some(c => norm(c) === token)
+
+  let headerRowIndex = -1
+
+  // Heuristic A: find a row that includes all required header labels.
+  const required = ['lms', 'dx/tx', 'non-standard data', 'non-standard metric', 'ivms configuration']
+  for (let r = 0; r < grid.length; r++) {
+    const row = grid[r] || []
+    const ok = required.every(t => rowHas(row, t))
+    if (ok) { headerRowIndex = r; break }
+  }
+
+  // Heuristic B: if there's a title cell like "Advanced multipliers", use the next row as header.
+  if (headerRowIndex === -1) {
+    for (let r = 0; r < grid.length; r++) {
+      const row = grid[r] || []
+      const hasTitle = row.some(c => norm(c).includes('advanced multipliers'))
+      if (hasTitle) { headerRowIndex = r + 1; break }
+    }
+  }
+
+  if (headerRowIndex < 0 || headerRowIndex >= grid.length) return null
+
+  const header = grid[headerRowIndex] || []
+  const findCol = (label) => header.findIndex(c => norm(c) === String(label).toLowerCase())
+  const findMultiplierAfter = (colStart) => {
+    if (colStart < 0) return -1
+    for (let c = colStart + 1; c < header.length; c++) {
+      if (norm(header[c]) === 'multiplier') return c
+    }
+    return -1
+  }
+
+  const colLMs = findCol('LMs')
+  const colLMsMult = findMultiplierAfter(colLMs)
+  const colNet = findCol('Dx/Tx')
+  const colNetMult = findMultiplierAfter(colNet)
+  const colNsd = findCol('Non-Standard Data')
+  const colNsdMult = findMultiplierAfter(colNsd)
+  const colNsm = findCol('Non-Standard Metric')
+  const colNsmMult = findMultiplierAfter(colNsm)
+  const colIvms = findCol('IVMS Configuration')
+  const colIvmsMult = findMultiplierAfter(colIvms)
+
+  const anyCols =
+    colLMs >= 0 || colNet >= 0 || colNsd >= 0 || colNsm >= 0 || colIvms >= 0
+  if (!anyCols) return null
+
+  const levelKey = (v) => {
+    const s = norm(v)
+    if (!s || s === '-' || s === 'na' || s === 'n/a') return null
+    if (s === 'low') return 'Low'
+    if (s === 'medium' || s === 'med') return 'Medium'
+    if (s === 'high') return 'High'
+    return null
+  }
+
+  const lmBucket = []
+  const netTable = {}
+  const nsdTable = {}
+  const nsmTable = {}
+  const ivmsTable = {}
+
+  let emptyStreak = 0
+  for (let r = headerRowIndex + 1; r < grid.length; r++) {
+    const row = grid[r] || []
+
+    const vals = [
+      colLMs >= 0 ? row[colLMs] : null,
+      colNet >= 0 ? row[colNet] : null,
+      colNsd >= 0 ? row[colNsd] : null,
+      colNsm >= 0 ? row[colNsm] : null,
+      colIvms >= 0 ? row[colIvms] : null,
+    ]
+    const hasAny = vals.some(v => cellText(v))
+    if (!hasAny) {
+      emptyStreak++
+      if (emptyStreak >= 3) break
+      continue
+    }
+    emptyStreak = 0
+
+    const maxLMs = parseNum(colLMs >= 0 ? row[colLMs] : null)
+    const lmMult = parseNum(colLMsMult >= 0 ? row[colLMsMult] : null)
+    if (Number.isFinite(maxLMs) && maxLMs > 0 && Number.isFinite(lmMult) && lmMult > 0) {
+      lmBucket.push({ maxLMs, multiplier: lmMult })
+    }
+
+    const netRaw = cellText(colNet >= 0 ? row[colNet] : '')
+    const netMult = parseNum(colNetMult >= 0 ? row[colNetMult] : null)
+    if (netRaw && Number.isFinite(netMult) && netMult > 0) {
+      const canon = normalizeNetworkType(netRaw) || netRaw
+      if (canon) netTable[canon] = netMult
+    }
+
+    const nsd = levelKey(colNsd >= 0 ? row[colNsd] : null)
+    const nsdMult = parseNum(colNsdMult >= 0 ? row[colNsdMult] : null)
+    if (nsd && Number.isFinite(nsdMult) && nsdMult > 0) nsdTable[nsd] = nsdMult
+
+    const nsm = levelKey(colNsm >= 0 ? row[colNsm] : null)
+    const nsmMult = parseNum(colNsmMult >= 0 ? row[colNsmMult] : null)
+    if (nsm && Number.isFinite(nsmMult) && nsmMult > 0) nsmTable[nsm] = nsmMult
+
+    const iv = levelKey(colIvms >= 0 ? row[colIvms] : null)
+    const ivMult = parseNum(colIvmsMult >= 0 ? row[colIvmsMult] : null)
+    if (iv && Number.isFinite(ivMult) && ivMult > 0) ivmsTable[iv] = ivMult
+  }
+
+  const out = {}
+  if (lmBucket.length) {
+    // Deduplicate by maxLMs (last wins), then sort ascending.
+    const byMax = new Map()
+    for (const it of lmBucket) byMax.set(it.maxLMs, it.multiplier)
+    out.lmBucketMultipliers = [...byMax.entries()]
+      .map(([maxLMs, multiplier]) => ({ maxLMs, multiplier }))
+      .sort((a, b) => a.maxLMs - b.maxLMs)
+  }
+
+  const adv = {}
+  if (Object.keys(netTable).length) adv.networkTypeMultipliers = netTable
+  if (Object.keys(nsdTable).length) adv.nonStandardDataMultipliers = nsdTable
+  if (Object.keys(nsmTable).length) adv.nonStandardMetricMultipliers = nsmTable
+  if (Object.keys(ivmsTable).length) adv.ivmsConfigurationMultipliers = ivmsTable
+  if (Object.keys(adv).length) out.advancedMultipliers = adv
+
+  return Object.keys(out).length ? out : null
 }
 
 // ─────────────────────────────────────────────────────────────────────────

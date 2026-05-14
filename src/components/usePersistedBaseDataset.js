@@ -12,6 +12,14 @@ function nowIso() {
   return new Date().toISOString()
 }
 
+function fingerprintFromHeaders(headers) {
+  const etag = safeText(headers?.get?.('etag') || '')
+  const lastModified = safeText(headers?.get?.('last-modified') || '')
+  const contentLength = safeText(headers?.get?.('content-length') || '')
+  const fingerprint = [etag, lastModified, contentLength].filter(Boolean).join('__')
+  return { etag, lastModified, contentLength, fingerprint }
+}
+
 function defaultPlanUrlCandidates() {
   // `vite.config.js` uses base:'./' which makes asset paths relative.
   // These candidates cover:
@@ -29,6 +37,25 @@ function defaultPlanUrlCandidates() {
   ]
 }
 
+async function fetchBundledDefaultPlanFingerprint() {
+  const urls = defaultPlanUrlCandidates()
+  let lastErr = null
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { method: 'HEAD', cache: 'no-store' })
+      if (!r.ok) {
+        lastErr = new Error(`Default plan not found at ${url} (${r.status}).`)
+        continue
+      }
+      return fingerprintFromHeaders(r.headers)
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  if (lastErr) throw lastErr
+  return null
+}
+
 async function fetchBundledDefaultPlanFile() {
   const urls = defaultPlanUrlCandidates()
   let res = null
@@ -44,11 +71,12 @@ async function fetchBundledDefaultPlanFile() {
     }
   }
   if (!res) throw (lastErr || new Error('Default plan not found.'))
+  const fp = fingerprintFromHeaders(res.headers)
   const blob = await res.blob()
   const file = new File([blob], 'SPARK Default Plan.xlsx', {
     type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   })
-  return { file, blob }
+  return { file, blob, fingerprint: fp }
 }
 
 function summarizeIngest(ingest) {
@@ -68,8 +96,11 @@ export function usePersistedBaseDataset() {
   const [base, setBase] = useState(null) // { savedAt, sourceFileName, ingest }
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [loadState, setLoadState] = useState('loading') // 'loading' | 'loaded' | 'failed'
+  const [bundledDefaultUpdate, setBundledDefaultUpdate] = useState({ checking: false, available: false, etag: '', lastModified: '', contentLength: '', fingerprint: '', reason: '' })
   const seedInFlightRef = useRef(null) // Promise | null
   const mountedRef = useRef(true)
+  const autoBundledUpdateRef = useRef(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -79,6 +110,7 @@ export function usePersistedBaseDataset() {
   useEffect(() => {
     let alive = true
     setLoading(true)
+    setLoadState('loading')
 
     const withTimeout = (p, ms) => {
       return Promise.race([
@@ -87,19 +119,23 @@ export function usePersistedBaseDataset() {
       ])
     }
 
-    withTimeout(loadBaseDataset(), 1500)
+    // Important: never assume "empty" if IndexedDB open/get stalls.
+    // If we did, we'd risk overwriting an existing saved plan by re-seeding the default.
+    withTimeout(loadBaseDataset(), 6000)
       .then((v) => {
         if (!alive) return
         setBase(v)
         setLoading(false)
+        setLoadState('loaded')
       })
       .catch((e) => {
         if (!alive) return
-        // Treat load failures/timeouts as "no base" so default seeding can proceed.
-        // (Safari/private browsing can sometimes stall IndexedDB open.)
+        // If IndexedDB is slow/unavailable (Safari/private browsing can stall),
+        // do NOT overwrite storage by seeding. We'll fall back to an in-memory default plan.
         setBase(null)
-        setError(null)
+        setError(e?.message || 'Failed to load saved plan from this browser.')
         setLoading(false)
+        setLoadState('failed')
       })
     return () => { alive = false }
   }, [])
@@ -108,18 +144,22 @@ export function usePersistedBaseDataset() {
     // Seed default plan only when:
     // - base is missing
     // - initial load finished
+    // - IndexedDB load succeeded (otherwise we risk overwriting an existing saved plan)
     if (loading) return
     if (base?.ingest) return
     if (seedInFlightRef.current) return
+    if (loadState !== 'loaded') return
 
     const seedDefaultPlan = async () => {
-      const { file, blob } = await fetchBundledDefaultPlanFile()
+      const { file, blob, fingerprint } = await fetchBundledDefaultPlanFile()
       const ingest = await ingestExcelFile(file)
       const payload = {
         savedAt: nowIso(),
         isBundledDefault: true,
         sourceFileName: safeText(file.name),
         workbookBlob: blob,
+        bundledDefaultFingerprint: fingerprint?.fingerprint || '',
+        bundledDefaultLastModified: fingerprint?.lastModified || '',
         capacityConfig: null,
         ingest,
         audit: [
@@ -131,12 +171,7 @@ export function usePersistedBaseDataset() {
           }
         ],
       }
-      try {
-        await saveBaseDataset(payload)
-      } catch {
-        // If IndexedDB isn't available (rare in privacy modes), still allow the app
-        // to function this session using an in-memory base dataset.
-      }
+      await saveBaseDataset(payload)
       return payload
     }
 
@@ -156,7 +191,55 @@ export function usePersistedBaseDataset() {
         setError(e?.message || 'Failed to seed default plan.')
         setLoading(false)
       })
-  }, [base, loading])
+  }, [base, loading, loadState])
+
+  useEffect(() => {
+    // If we cannot reliably load IndexedDB, keep the app usable by seeding
+    // the default plan in-memory only (do not write to IndexedDB).
+    if (loading) return
+    if (base?.ingest) return
+    if (seedInFlightRef.current) return
+    if (loadState !== 'failed') return
+
+    const seedInMemoryDefaultPlan = async () => {
+      const { file, blob, fingerprint } = await fetchBundledDefaultPlanFile()
+      const ingest = await ingestExcelFile(file)
+      const payload = {
+        savedAt: nowIso(),
+        isBundledDefault: true,
+        sourceFileName: safeText(file.name),
+        workbookBlob: blob,
+        bundledDefaultFingerprint: fingerprint?.fingerprint || '',
+        bundledDefaultLastModified: fingerprint?.lastModified || '',
+        capacityConfig: null,
+        ingest,
+        audit: [
+          {
+            at: nowIso(),
+            by: safeText(localStorage.getItem('spark_editor_name') || ''),
+            action: 'base_seed_default_plan_in_memory_only',
+            sourceFileName: safeText(file.name),
+          }
+        ],
+      }
+      return payload
+    }
+
+    setLoading(true)
+    seedInFlightRef.current = seedInMemoryDefaultPlan()
+      .then((payload) => {
+        seedInFlightRef.current = null
+        if (!mountedRef.current) return
+        setBase(payload)
+        setLoading(false)
+      })
+      .catch((e) => {
+        seedInFlightRef.current = null
+        if (!mountedRef.current) return
+        setError(e?.message || 'Failed to load default plan.')
+        setLoading(false)
+      })
+  }, [base, loading, loadState])
 
   const baseSummary = useMemo(() => summarizeIngest(base?.ingest), [base])
 
@@ -198,13 +281,15 @@ export function usePersistedBaseDataset() {
     setLoading(true)
     setError(null)
     try {
-      const { file, blob } = await fetchBundledDefaultPlanFile()
+      const { file, blob, fingerprint } = await fetchBundledDefaultPlanFile()
       const ingest = await ingestExcelFile(file)
       const payload = {
         savedAt: nowIso(),
         isBundledDefault: true,
         sourceFileName: safeText(file.name),
         workbookBlob: blob,
+        bundledDefaultFingerprint: fingerprint?.fingerprint || '',
+        bundledDefaultLastModified: fingerprint?.lastModified || '',
         capacityConfig: null,
         ingest,
         audit: [
@@ -407,6 +492,65 @@ export function usePersistedBaseDataset() {
     }
   }, [base])
 
+  useEffect(() => {
+    if (loading) return
+    if (loadState !== 'loaded') return
+    if (!base?.ingest) return
+
+    const isBundledDefault = !!(base?.isBundledDefault || (base?.audit || []).some(a => a?.action === 'base_seed_default_plan'))
+    if (!isBundledDefault) {
+      setBundledDefaultUpdate(prev => ({ ...(prev || {}), checking: false, available: false, reason: '' }))
+      return
+    }
+
+    let alive = true
+    ;(async () => {
+      try {
+        setBundledDefaultUpdate(prev => ({ ...(prev || {}), checking: true, reason: '' }))
+        const fp = await fetchBundledDefaultPlanFingerprint()
+        if (!alive) return
+
+        const currentFp = safeText(base?.bundledDefaultFingerprint || '')
+        const remoteFp = safeText(fp?.fingerprint || '')
+
+        const currentModIso = safeText(base?.ingest?.meta?.workbookModifiedAt || '')
+        const currentMod = currentModIso ? new Date(currentModIso) : null
+        const remoteMod = fp?.lastModified ? new Date(fp.lastModified) : null
+        const currentModOk = currentMod instanceof Date && !isNaN(currentMod.getTime())
+        const remoteModOk = remoteMod instanceof Date && !isNaN(remoteMod.getTime())
+
+        const fingerprintDiff = !!(currentFp && remoteFp && currentFp !== remoteFp)
+        const modifiedDiff = currentModOk && remoteModOk ? (remoteMod.getTime() - currentMod.getTime() > 60 * 1000) : false
+        const available = fingerprintDiff || (!currentFp && modifiedDiff)
+
+        setBundledDefaultUpdate({
+          checking: false,
+          available,
+          etag: fp?.etag || '',
+          lastModified: fp?.lastModified || '',
+          contentLength: fp?.contentLength || '',
+          fingerprint: fp?.fingerprint || '',
+          reason: fingerprintDiff ? 'fingerprint_changed' : (available ? 'last_modified_newer' : ''),
+        })
+
+        // Auto-update ONLY when user has not edited the bundled default locally.
+        const audit = Array.isArray(base?.audit) ? base.audit : []
+        const hasUserEdits = audit.some(a => a?.action === 'base_updated')
+        const hasCapacityEdits = !!base?.capacityConfig
+        const canAuto = available && !hasUserEdits && !hasCapacityEdits
+        if (canAuto && !autoBundledUpdateRef.current) {
+          autoBundledUpdateRef.current = true
+          await resetToBundledDefaultPlan?.({ note: 'Auto-updated to latest bundled default plan' })
+        }
+      } catch {
+        if (!alive) return
+        setBundledDefaultUpdate(prev => ({ ...(prev || {}), checking: false }))
+      }
+    })()
+
+    return () => { alive = false }
+  }, [base, loading, loadState, resetToBundledDefaultPlan])
+
   const clearBase = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -425,6 +569,7 @@ export function usePersistedBaseDataset() {
     baseSummary,
     loading,
     error,
+    bundledDefaultUpdate,
     setBaseFromFile,
     updateBaseIngest,
     updateBaseProjects,

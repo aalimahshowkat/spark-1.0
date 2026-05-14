@@ -59,7 +59,7 @@ export const NAV = [
     group: 'ai',
     label: 'Intelligence',
     items: [
-      { id: 'ai',         label: 'SPARK AI',     icon: IconAI,       alwaysEnabled: true, badge: 'New' },
+      { id: 'ai',         label: 'SPARK AI',     icon: IconAI,       alwaysEnabled: true },
       { id: 'guide',      label: 'User Guide',   icon: IconGuide,    alwaysEnabled: true },
     ]
   },
@@ -86,14 +86,17 @@ function AppInner({ onLogout }) {
   const [fileName,     setFileName]     = useState(null)
   const [uploadedFile, setUploadedFile] = useState(null)
   const [insightsSource, setInsightsSource] = useState('engine')
-  const [datasetMode,  setDatasetMode]  = useState('override')
+  // Default to the persisted plan so edits (PTO, roster, projects) survive refresh.
+  // Override mode remains available when the user uploads a workbook.
+  const [datasetMode,  setDatasetMode]  = useState('base')
   const [capacityConfigOverride, setCapacityConfigOverride] = useState(null) // session-only (override mode)
   const [rosterOverride, setRosterOverride] = useState(null)   // session-only (override mode)
   const [projectsOverride, setProjectsOverride] = useState(null) // session-only (override mode)
+  const pendingBaseCapacityConfigRef = useRef(null) // { capacityConfig, note } | null
 
   const { base, baseSummary, loading: baseLoading, error: baseError,
           setBaseFromFile, updateBaseProjects, updateBaseRoster, updateBaseCapacityConfig,
-          detachBaseWorkbook, resetToBundledDefaultPlan, resetBaseToSourceWorkbook, clearBase } = usePersistedBaseDataset()
+          detachBaseWorkbook, resetToBundledDefaultPlan, resetBaseToSourceWorkbook, clearBase, bundledDefaultUpdate } = usePersistedBaseDataset()
 
   const effectiveCapacityConfig = useMemo(() => {
     if (datasetMode === 'base') return base?.capacityConfig || null
@@ -244,11 +247,40 @@ function AppInner({ onLogout }) {
   const handleUpdateCapacityConfig = useCallback(async ({ capacityConfig, note }) => {
     // Persist if using saved plan; otherwise keep as session-only until "Save as plan".
     if (datasetMode === 'base') {
+      // If the saved plan hasn't finished loading yet, queue the edit so it won't be lost.
+      // This prevents a common footgun: user edits PTO quickly on initial load, but the app
+      // hadn't switched to the loaded base dataset yet.
+      if (baseLoading || !base?.ingest) {
+        pendingBaseCapacityConfigRef.current = { capacityConfig: capacityConfig ?? null, note: note || '' }
+        setNotice('Saving… (waiting for plan to finish loading)')
+        return
+      }
       await updateBaseCapacityConfig?.({ capacityConfig, note: note || 'Updated capacity settings' })
     } else {
       setCapacityConfigOverride(capacityConfig || null)
     }
   }, [datasetMode, updateBaseCapacityConfig])
+
+  useEffect(() => {
+    // Flush any queued capacityConfig edit once the base dataset is ready.
+    if (datasetMode !== 'base') return
+    if (baseLoading) return
+    if (!base?.ingest) return
+    const pending = pendingBaseCapacityConfigRef.current
+    if (!pending) return
+    pendingBaseCapacityConfigRef.current = null
+    ;(async () => {
+      try {
+        await updateBaseCapacityConfig?.({
+          capacityConfig: pending.capacityConfig ?? null,
+          note: pending.note || 'Updated capacity settings',
+        })
+        setNotice('Saved.')
+      } catch {
+        // ignore; hook exposes baseError banner
+      }
+    })()
+  }, [datasetMode, baseLoading, base?.ingest, updateBaseCapacityConfig])
 
   return (
     <div style={{ display:'flex', minHeight:'100vh', background:'var(--surface-base)' }}>
@@ -281,6 +313,7 @@ function AppInner({ onLogout }) {
                 base={base}
                 baseSummary={baseSummary}
                 baseLoading={baseLoading}
+                bundledDefaultUpdate={bundledDefaultUpdate}
                 datasetMode={datasetMode}
                 onPromoteOverrideToBase={handlePromoteToBase}
                 onClearBase={handleClearBase}

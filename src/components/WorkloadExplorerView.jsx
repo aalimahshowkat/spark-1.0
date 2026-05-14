@@ -83,6 +83,11 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
   const [person, setPerson] = useState('')
   const [demandRole, setDemandRole] = useState('All')
   const [showTopDemand, setShowTopDemand] = useState(false)
+  const [showCollab, setShowCollab] = useState(false)
+  const [collabView, setCollabView] = useState('pm_analyst') // future: pm_csm, csm_analyst
+  const [collabPmQ, setCollabPmQ] = useState('')
+  const [collabAnalystQ, setCollabAnalystQ] = useState('')
+  const [collabMonthIndex, setCollabMonthIndex] = useState(0)
   const [portfolioQuery, setPortfolioQuery] = useState('')
   const [demandQuery, setDemandQuery] = useState('')
 
@@ -337,6 +342,169 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
 
     return out
   }, [personRows, role, projectMetaByName])
+
+  const pmAnalystMatrix = useMemo(() => {
+    if (!showCollab) return { months: [], monthIndex: null, pmList: [], analystList: [], cell: new Map(), projectNameByKey: new Map() }
+
+    const scopeProjectKeys = new Set()
+    for (const a of assignments) {
+      const key = a?.projectId || a?.projectName
+      if (key) scopeProjectKeys.add(key)
+    }
+    const projectKeyInScope = (k) => !!k && scopeProjectKeys.has(k)
+    const projectNameByKey = new Map()
+    for (const a of assignments) {
+      const key = a?.projectId || a?.projectName
+      if (!projectKeyInScope(key)) continue
+      const name = String(a?.projectName || '').trim() || '(unnamed)'
+      if (!projectNameByKey.has(key)) projectNameByKey.set(key, name)
+    }
+
+    // Determine which months actually have both PM + Analyst on the same project in-scope.
+    const monthsWithAny = new Set()
+
+    // projectKey__monthIndex -> { pm:Set, analyst:Set }
+    const byProjectMonth = new Map()
+    const add = (key, mi, bucket, name) => {
+      const k = `${key}__${mi}`
+      if (!byProjectMonth.has(k)) byProjectMonth.set(k, { projectKey: key, monthIndex: mi, pm: new Set(), analyst: new Set() })
+      const rec = byProjectMonth.get(k)
+      if (bucket === 'PM') rec.pm.add(name)
+      if (bucket === 'Analyst') rec.analyst.add(name)
+    }
+
+    // hoursBy (projectKey, monthIndex, bucket, person) for totals
+    const hoursBy = new Map()
+    const addHours = (key, mi, bucket, name, hrs) => {
+      const k = `${key}__${mi}__${bucket}__${name}`
+      hoursBy.set(k, (hoursBy.get(k) || 0) + hrs)
+    }
+
+    for (const a of assignments) {
+      if (!a || a.isUnstaffed) continue
+      const hrs = safeNum(a?.finalHours)
+      if (hrs <= 0) continue
+      const key = a?.projectId || a?.projectName
+      if (!projectKeyInScope(key)) continue
+      const mi = Number.isFinite(+a?.monthIndex) ? +a.monthIndex : null
+      if (mi === null || mi < 0 || mi > 11) continue
+
+      const bucket = roleBucket(a?.role)
+      if (bucket !== 'PM' && bucket !== 'Analyst') continue
+
+      const name = String(a?.person || '').trim()
+      if (!name) continue
+      add(key, mi, bucket, name)
+      addHours(key, mi, bucket, name, hrs)
+    }
+
+    for (const rec of byProjectMonth.values()) {
+      if (rec.pm.size && rec.analyst.size) monthsWithAny.add(rec.monthIndex)
+    }
+
+    const months = [...monthsWithAny].sort((a, b) => a - b)
+    if (months.length === 0) {
+      return { months: [], monthIndex: null, pmList: [], analystList: [], cell: new Map(), projectNameByKey }
+    }
+
+    // Keep selection stable: if current month has no data, snap to first month with data.
+    const monthIndex = months.includes(collabMonthIndex) ? collabMonthIndex : months[0]
+
+    // Build pair cells for the selected monthIndex.
+    const pmTotals = new Map()
+    const analystTotals = new Map()
+
+    // pm__analyst -> { projects: Map(projectKey -> { name, pmHours, analystHours }) }
+    const cell = new Map()
+    const ensureCell = (pm, analyst) => {
+      const k = `${pm}__${analyst}`
+      if (!cell.has(k)) cell.set(k, { pm, analyst, projects: new Map(), pmHours: 0, analystHours: 0 })
+      return cell.get(k)
+    }
+
+    for (const rec of byProjectMonth.values()) {
+      if (rec.monthIndex !== monthIndex) continue
+      if (!rec.pm.size || !rec.analyst.size) continue
+      const projectKey = rec.projectKey
+      const projectName = projectNameByKey.get(projectKey) || '(unnamed)'
+
+      for (const pm of rec.pm) {
+        const pmH = hoursBy.get(`${projectKey}__${monthIndex}__PM__${pm}`) || 0
+        pmTotals.set(pm, (pmTotals.get(pm) || 0) + pmH)
+        for (const an of rec.analyst) {
+          const anH = hoursBy.get(`${projectKey}__${monthIndex}__Analyst__${an}`) || 0
+          analystTotals.set(an, (analystTotals.get(an) || 0) + anH)
+
+          const c = ensureCell(pm, an)
+          if (!c.projects.has(projectKey)) c.projects.set(projectKey, { key: projectKey, name: projectName, pmHours: 0, analystHours: 0 })
+          const pRec = c.projects.get(projectKey)
+          pRec.pmHours += pmH
+          pRec.analystHours += anH
+          c.pmHours += pmH
+          c.analystHours += anH
+        }
+      }
+    }
+
+    const pmList = [...pmTotals.entries()]
+      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+      .map(([name]) => name)
+    const analystList = [...analystTotals.entries()]
+      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+      .map(([name]) => name)
+
+    return { months, monthIndex, pmList, analystList, cell, projectNameByKey }
+  }, [assignments, collabMonthIndex, showCollab])
+
+  const exportPmAnalystCsv = () => {
+    if (!pmAnalystMatrix?.months?.length) return
+    const monthIndex = pmAnalystMatrix.monthIndex
+    if (monthIndex === null || monthIndex === undefined) return
+
+    const norm = (s) => String(s || '').trim().toLowerCase()
+    const pmQ = norm(collabPmQ)
+    const anQ = norm(collabAnalystQ)
+    const pmList = (pmAnalystMatrix.pmList || []).filter(n => !pmQ || norm(n).includes(pmQ))
+    const analystList = (pmAnalystMatrix.analystList || []).filter(n => !anQ || norm(n).includes(anQ))
+
+    const esc = (v) => {
+      const s = String(v ?? '')
+      const needs = s.includes(',') || s.includes('"') || s.includes('\n')
+      const out = s.replace(/\"/g, '\"\"')
+      return needs ? `"${out}"` : out
+    }
+
+    const lines = []
+    lines.push([`Month ${MONTHS[monthIndex]} ${planningYear}`, ...pmList].map(esc).join(','))
+
+    for (const an of analystList) {
+      const row = [an]
+      for (const pm of pmList) {
+        const k = `${pm}__${an}`
+        const cell = pmAnalystMatrix.cell.get(k) || null
+        const projects = cell ? [...cell.projects.values()] : []
+        projects.sort((a, b) => ((b.analystHours + b.pmHours) || 0) - ((a.analystHours + a.pmHours) || 0))
+        const count = projects.length
+        if (!count) { row.push(''); continue }
+        const names = projects.map(p => p.name).slice(0, 12)
+        const more = count > 12 ? count - 12 : 0
+        const total = Math.round((cell?.analystHours || 0) + (cell?.pmHours || 0))
+        row.push(`${count} projects · ${total}h · ${names.join('; ')}${more ? `; +${more} more` : ''}`)
+      }
+      lines.push(row.map(esc).join(','))
+    }
+
+    const csv = lines.join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `spark_collaboration_pm_analyst_${planningYear}_${String((monthIndex + 1)).padStart(2, '0')}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => { try { URL.revokeObjectURL(url) } catch {} }, 250)
+  }
 
   const monthlyTotals = useMemo(() => {
     const tot = new Array(12).fill(0)
@@ -624,6 +792,275 @@ export default function WorkloadExplorerView({ engineInput, engineCalc }) {
               ) : (
                 <div style={{ padding: '16px 0', color: C.faint, fontSize: 12.5 }}>
                   {demandQuery ? 'No projects match your search.' : 'No demand found for this selection.'}
+                </div>
+              )}
+            </CardBody>
+          )}
+        </Card>
+      )}
+
+      {/* Collaboration mapping (collapsible) */}
+      {engineInput && (
+        <Card style={{ marginBottom: 16 }}>
+          <CardHeader
+            title="Collaboration mapping"
+            tag="PM × Analyst"
+          >
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <Pill type="amber">New</Pill>
+              <button
+                onClick={() => setShowCollab(v => !v)}
+                style={{
+                  padding: '6px 10px',
+                  borderRadius: 8,
+                  border: `1px solid ${C.border}`,
+                  background: 'white',
+                  fontSize: 12,
+                  fontFamily: 'var(--font-sans)',
+                  cursor: 'pointer',
+                }}
+                title={showCollab ? 'Collapse' : 'Expand'}
+              >
+                {showCollab ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </CardHeader>
+          {showCollab && (
+            <CardBody>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+                <div style={{ fontSize: 11.5, color: C.muted, fontWeight: 800, letterSpacing: '0.02em' }}>
+                  View
+                </div>
+                <select
+                  value={collabView}
+                  onChange={(e) => setCollabView(e.target.value)}
+                  style={{
+                    padding: '7px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${C.border}`,
+                    background: 'white',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    cursor: 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  <option value="pm_analyst">PM × Analyst</option>
+                </select>
+
+                <input
+                  value={collabPmQ}
+                  onChange={(e) => setCollabPmQ(e.target.value)}
+                  placeholder="Search PM…"
+                  style={{
+                    padding: '7px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${C.border}`,
+                    background: 'white',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    outline: 'none',
+                    width: 200,
+                  }}
+                />
+                <input
+                  value={collabAnalystQ}
+                  onChange={(e) => setCollabAnalystQ(e.target.value)}
+                  placeholder="Search Analyst…"
+                  style={{
+                    padding: '7px 10px',
+                    borderRadius: 8,
+                    border: `1px solid ${C.border}`,
+                    background: 'white',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    outline: 'none',
+                    width: 200,
+                  }}
+                />
+
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    onClick={() => exportPmAnalystCsv()}
+                    style={{
+                      padding: '7px 10px',
+                      borderRadius: 8,
+                      border: `1px solid ${C.border}`,
+                      background: 'white',
+                      fontSize: 12,
+                      fontFamily: 'var(--font-sans)',
+                      cursor: pmAnalystMatrix.months.length ? 'pointer' : 'not-allowed',
+                      opacity: pmAnalystMatrix.months.length ? 1 : 0.6,
+                    }}
+                    title={pmAnalystMatrix.months.length ? 'Export as CSV' : 'No collaboration data to export'}
+                    disabled={!pmAnalystMatrix.months.length}
+                  >
+                    Export CSV
+                  </button>
+                </div>
+              </div>
+
+              {pmAnalystMatrix.months.length === 0 ? (
+                <div style={{ fontSize: 12.5, color: C.faint, lineHeight: 1.6 }}>
+                  No PM↔Analyst collaboration detected. (This section lights up when a PM and an Analyst share the same project in the same month.)
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: 10 }}>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ fontSize: 11, fontWeight: 950, letterSpacing: '0.08em', textTransform: 'uppercase', color: C.muted }}>
+                      Month
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      {pmAnalystMatrix.months.map(mi => {
+                        const active = mi === pmAnalystMatrix.monthIndex
+                        return (
+                          <button
+                            key={mi}
+                            onClick={() => setCollabMonthIndex(mi)}
+                            style={{
+                              padding: '6px 10px',
+                              borderRadius: 999,
+                              border: `1px solid ${active ? 'rgba(99,102,241,0.55)' : C.border}`,
+                              background: active ? 'rgba(99,102,241,0.10)' : 'var(--surface-0)',
+                              color: active ? 'rgba(67,56,202,1)' : C.muted,
+                              fontWeight: 900,
+                              cursor: 'pointer',
+                              fontSize: 12,
+                            }}
+                          >
+                            {MONTHS[mi]}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const norm = (s) => String(s || '').trim().toLowerCase()
+                    const pmQ = norm(collabPmQ)
+                    const anQ = norm(collabAnalystQ)
+                    const pmList = (pmAnalystMatrix.pmList || []).filter(n => !pmQ || norm(n).includes(pmQ))
+                    const analystList = (pmAnalystMatrix.analystList || []).filter(n => !anQ || norm(n).includes(anQ))
+
+                    return (
+                      <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+                        <div style={{ overflow: 'auto', maxHeight: 420 }}>
+                          <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 12.5 }}>
+                            <thead>
+                              <tr>
+                                <th
+                                  style={{
+                                    position: 'sticky',
+                                    top: 0,
+                                    left: 0,
+                                    zIndex: 3,
+                                    textAlign: 'left',
+                                    padding: '10px 12px',
+                                    background: 'var(--surface-1)',
+                                    borderBottom: `1px solid ${C.border}`,
+                                    minWidth: 180,
+                                  }}
+                                >
+                                  Analyst
+                                </th>
+                                {pmList.map(pm => (
+                                  <th
+                                    key={pm}
+                                    style={{
+                                      position: 'sticky',
+                                      top: 0,
+                                      zIndex: 2,
+                                      textAlign: 'left',
+                                      padding: '10px 12px',
+                                      background: 'var(--surface-1)',
+                                      borderBottom: `1px solid ${C.border}`,
+                                      minWidth: 220,
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                    title={pm}
+                                  >
+                                    <div style={{ fontWeight: 950, color: C.ink, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      {pm}
+                                    </div>
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {analystList.map(an => (
+                                <tr key={an}>
+                                  <td
+                                    style={{
+                                      position: 'sticky',
+                                      left: 0,
+                                      zIndex: 1,
+                                      padding: '10px 12px',
+                                      background: 'var(--surface-0)',
+                                      borderBottom: `1px solid ${C.border}`,
+                                      minWidth: 180,
+                                    }}
+                                    title={an}
+                                  >
+                                    <div style={{ fontWeight: 900, color: C.ink, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {an}
+                                    </div>
+                                  </td>
+                                  {pmList.map(pm => {
+                                    const k = `${pm}__${an}`
+                                    const cell = pmAnalystMatrix.cell.get(k) || null
+                                    const projects = cell ? [...cell.projects.values()] : []
+                                    projects.sort((a, b) => ((b.analystHours + b.pmHours) || 0) - ((a.analystHours + a.pmHours) || 0))
+                                    const count = projects.length
+                                    const names = projects.slice(0, 2).map(p => p.name)
+                                    const more = count > 2 ? count - 2 : 0
+                                    const title = count
+                                      ? projects.map(p => `${p.name} (PM ${Math.round(p.pmHours)}h · Analyst ${Math.round(p.analystHours)}h)`).join('\n')
+                                      : ''
+
+                                    return (
+                                      <td
+                                        key={pm}
+                                        style={{
+                                          padding: '10px 12px',
+                                          borderBottom: `1px solid ${C.border}`,
+                                          borderLeft: `1px solid ${C.border}`,
+                                          verticalAlign: 'top',
+                                          background: count ? 'rgba(34,197,94,0.06)' : 'transparent',
+                                        }}
+                                        title={title}
+                                      >
+                                        {count === 0 ? (
+                                          <div style={{ color: C.faint, fontSize: 12 }}>—</div>
+                                        ) : (
+                                          <div style={{ display: 'grid', gap: 4 }}>
+                                            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', justifyContent: 'space-between' }}>
+                                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, color: C.muted, fontWeight: 900 }}>
+                                                {count} project{count === 1 ? '' : 's'}
+                                              </div>
+                                              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, color: C.faint, fontWeight: 900 }}>
+                                                {Math.round((cell?.analystHours || 0) + (cell?.pmHours || 0)).toLocaleString()}h
+                                              </div>
+                                            </div>
+                                            <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.4 }}>
+                                              {names.join(', ')}{more ? ` +${more} more` : ''}
+                                            </div>
+                                          </div>
+                                        )}
+                                      </td>
+                                    )
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.6 }}>
+                    Each cell lists projects where the PM and Analyst both have staffed hours in {MONTHS[pmAnalystMatrix.monthIndex]}.
+                  </div>
                 </div>
               )}
             </CardBody>

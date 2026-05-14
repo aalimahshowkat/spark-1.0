@@ -175,87 +175,14 @@ export function applyScenario(baseline, scenario, opts = {}) {
     .filter(p => p && !projectOverrides[p.id]?.exclude)
     .map(p => applyProjectOverride({ ...p }, projectOverrides[p.id], { lmBucketTable }))
 
-  // PM calculations use ProjectList "phaseHours" for PM. Baseline ingest provides this,
-  // but scenario-added projects may not. Populate from Demand Matrix (or schema fallback).
-  const dmIndex = buildMatrixIndex(baseline.demandMatrix || [])
-  const ensurePmPhaseHours = (proj) => {
-    if (!proj) return proj
-    const existing = proj.phaseHours || {}
-    if (Object.keys(existing).length > 0) return proj
-    const vibe = proj.vibeType
-    const ph = dmIndex[`${vibe}__PM`] || (VIBE_PHASE_HOURS[vibe] || {})['PM'] || null
-    if (!ph) return proj
-    return {
-      ...proj,
-      phaseHours: {
-        'Project Start M0': parseFloat(ph['Project Start M0']) || 0,
-        'Project Start M1': parseFloat(ph['Project Start M1']) || 0,
-        'Project Mid':      parseFloat(ph['Project Mid'])      || 0,
-        'Project End M-1':  parseFloat(ph['Project End M-1'])  || 0,
-        'Project End M0':   parseFloat(ph['Project End M0'])   || 0,
-        'Project End M1':   parseFloat(ph['Project End M1'])   || 0,
-        'Project End M1+':  parseFloat(ph['Project End M1+'])  || 0,
-      }
-    }
-  }
-
   modifiedProjects = [
     ...modifiedProjects,
-    ...added.map(ensurePmPhaseHours),
+    ...added,
   ]
 
-  // ── 1c. Scenario-only PM multipliers (task table → aggregated PM phaseHours) ───
-  // If provided, this overrides the PM base-hours override path (project.phaseHours)
-  // for ALL projects in the scenario based on their VIBE tag (customer journey stage).
-  const pmTaskTable = assumptionOverrides?.pmTaskMultipliers || null
-  if (pmTaskTable && typeof pmTaskTable === 'object' && baseline?.demandTasks?.length) {
-    const baseRows = baseline.demandTasks.filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
-    const overrides = pmTaskTable?.overridesByKey || {}
-    const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
-
-    // Build effective rows: baseline task rows with per-cell overrides applied.
-    const effective = baseRows.map(r => {
-      const stage = String(r?.stage || '').trim()
-      const taskStage = String(r?.taskStage || '').trim()
-      const key = normKey(stage, taskStage)
-      const ov = overrides?.[key]
-      if (!ov || typeof ov !== 'object') return r
-      const ph = { ...(r.phaseHours || {}) }
-      for (const k of ['Project Start M0','Project Start M1','Project Mid','Project End M-1','Project End M0','Project End M1','Project End M1+']) {
-        if (ov[k] !== undefined && ov[k] !== null && Number.isFinite(+ov[k])) ph[k] = +ov[k]
-      }
-      return { ...r, phaseHours: ph }
-    })
-
-    // Aggregate into VIBE-level PM phaseHours by customer journey stage.
-    const totalsByStage = new Map()
-    for (const r of effective) {
-      const stage = String(r?.stage || '').trim()
-      if (!stage) continue
-      if (!totalsByStage.has(stage)) {
-        totalsByStage.set(stage, {
-          'Project Start M0': 0,
-          'Project Start M1': 0,
-          'Project Mid': 0,
-          'Project End M-1': 0,
-          'Project End M0': 0,
-          'Project End M1': 0,
-          'Project End M1+': 0,
-        })
-      }
-      const tgt = totalsByStage.get(stage)
-      const ph = r.phaseHours || {}
-      for (const k of Object.keys(tgt)) tgt[k] += (parseFloat(ph[k]) || 0)
-    }
-
-    const stageForProject = (p) => String(p?.vibeType || '').trim()
-    modifiedProjects = modifiedProjects.map(p => {
-      const st = stageForProject(p)
-      const ph = totalsByStage.get(st)
-      if (!ph) return p
-      return { ...p, phaseHours: { ...ph } }
-    })
-  }
+  // Note: PM multipliers editor has been removed. PM demand is derived from the Demand Base Matrix
+  // and reconstructed via "Advanced multipliers" inside runCalculations when stage-hour overrides
+  // are not present on the Project List.
 
   // ── 2. Demand matrix — passed through unchanged ────────────────────
   const demandMatrix = baseline.demandMatrix
@@ -501,6 +428,26 @@ export function buildScenarioCapacityConfig({
     return Object.keys(out).length ? out : null
   }
 
+  const mergeAdvancedMultipliers = (base, override) => {
+    const b = (base && typeof base === 'object') ? base : null
+    const o = (override && typeof override === 'object') ? override : null
+    if (!b && !o) return null
+    const out = { ...(b || {}) }
+    for (const [k, v] of Object.entries(o || {})) {
+      if (k === 'projectOverrides') continue
+      out[k] = v
+    }
+    const bProj = (b?.projectOverrides && typeof b.projectOverrides === 'object') ? b.projectOverrides : {}
+    const oProj = (o?.projectOverrides && typeof o.projectOverrides === 'object') ? o.projectOverrides : {}
+    const proj = { ...bProj }
+    for (const [pid, patch] of Object.entries(oProj)) {
+      if (!patch || typeof patch !== 'object') continue
+      proj[pid] = { ...(proj[pid] || {}), ...patch }
+    }
+    if (Object.keys(proj).length) out.projectOverrides = proj
+    return Object.keys(out).length ? out : null
+  }
+
   return {
     planningYear,
     roster,
@@ -514,6 +461,7 @@ export function buildScenarioCapacityConfig({
     allocationsByPerson: baselineCapacityConfig?.allocationsByPerson || null,
     workingDays: mergeWorkingDays(baselineCapacityConfig?.workingDays || null, assumptionOverrides?.workingDaysDelta || null),
     assignmentBackfills: mergeAssignmentBackfills(baselineCapacityConfig?.assignmentBackfills || null, assumptionOverrides?.assignmentBackfillsDelta || null),
+    advancedMultipliers: mergeAdvancedMultipliers(baselineCapacityConfig?.advancedMultipliers || null, assumptionOverrides?.advancedMultipliers || null),
   }
 }
 

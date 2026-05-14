@@ -2,6 +2,39 @@ import { useEffect, useMemo, useState } from 'react'
 import { ingestExcelFile } from '../engine/ingest.js'
 import { runCalculations } from '../engine/calculate.js'
 
+function mergeCapacityConfigWithWorkbookTables(capacityConfig, ingestMeta) {
+  const base = (capacityConfig && typeof capacityConfig === 'object') ? { ...capacityConfig } : {}
+  const wb = ingestMeta?.workbookAdvancedMultipliers || null
+  if (!wb || typeof wb !== 'object') return Object.keys(base).length ? base : null
+
+  // LM bucket multipliers (if user hasn't overridden via Advanced planning)
+  if (!Array.isArray(base.lmBucketMultipliers) || base.lmBucketMultipliers.length === 0) {
+    const wbLm = wb?.lmBucketMultipliers
+    if (Array.isArray(wbLm) && wbLm.length) base.lmBucketMultipliers = wbLm
+  }
+
+  const wbAdv = wb?.advancedMultipliers
+  if (wbAdv && typeof wbAdv === 'object') {
+    const adv = (base.advancedMultipliers && typeof base.advancedMultipliers === 'object') ? { ...base.advancedMultipliers } : {}
+
+    const fillIfMissing = (key) => {
+      const cur = adv?.[key]
+      if (cur && typeof cur === 'object' && Object.keys(cur).length) return
+      const v = wbAdv?.[key]
+      if (v && typeof v === 'object' && Object.keys(v).length) adv[key] = v
+    }
+
+    fillIfMissing('networkTypeMultipliers')
+    fillIfMissing('nonStandardDataMultipliers')
+    fillIfMissing('nonStandardMetricMultipliers')
+    fillIfMissing('ivmsConfigurationMultipliers')
+
+    if (Object.keys(adv).length) base.advancedMultipliers = adv
+  }
+
+  return Object.keys(base).length ? base : null
+}
+
 export function useEngineCalc(engineInput) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -56,12 +89,13 @@ export function useEngineCalc(engineInput) {
     const runFromIngest = (rawIngest) => {
       const ing = applyOverrides(rawIngest)
       setIngest(ing)
+      const effectiveCapacityConfig = mergeCapacityConfigWithWorkbookTables(engineInput?.capacityConfig || null, ing?.meta || null)
       const c = runCalculations(
         ing.projects,
         ing.demandMatrix,
         ing.orbitMultipliers,
         ing?.meta?.planningYear,
-        { roster: ing?.roster || [], capacityConfig: engineInput?.capacityConfig || null }
+        { roster: ing?.roster || [], capacityConfig: effectiveCapacityConfig }
       )
       setCalc(c)
       setLoading(false)

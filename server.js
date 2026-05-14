@@ -221,7 +221,8 @@ UI MAP (use for step-by-step help):
 - Left sidebar → Intelligence: SPARK AI, User Guide
 - Plan → buttons include: Manage projects, Manage roster (Team roster)
 - Plan also includes: Download template, Upload/refresh plan, and (when you upload a file) Save as plan, Advanced planning (working hours/day + people allocations)
-- Advanced planning also includes: Working days & calendars (org holidays, role calendars, person PTO/non-project/weekend work) and Coverage & backfills (reassign unallocated work due to PTO)
+- Advanced planning also includes: Working days & calendars (org holidays, role calendars, person PTO/non-project/weekend work), Coverage & backfills (reassign unallocated work due to PTO), and Advanced multipliers (PM reconstruction from Dx/Tx + non-standard + IVMS + LM bucket)
+- Advanced planning also includes: Working days & calendars (org holidays, role calendars, person PTO/non-project/weekend work), Coverage & backfills (reassign unallocated work due to PTO), and Advanced multipliers (PM reconstruction from Dx/Tx + non-standard + IVMS + LM bucket). If the workbook provides an Advanced multipliers table inside Demand Base Matrix, SPARK can use those weights unless overridden in Advanced planning.
 - Top-right: Logout, Replace File
 - Scenarios are scenario-only sandboxes. There is no "apply scenario to plan" button today.
 WORKBOOK EXPECTATIONS:

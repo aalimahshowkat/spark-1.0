@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Card, CardHeader, CardBody, ActionButton, Pill, SectionHeader, Mono } from './ui'
 import { useEngineInsightsData } from './useEngineInsightsData'
 import NumericField from './NumericField'
+import AdvancedMultipliersEditor from './AdvancedMultipliersEditor'
 import CapacityAssumptionsModal from './CapacityAssumptionsModal'
 import { computePersonWorkingDaysByMonth } from '../engine/workingDays.js'
 import { LM_BUCKET_MULTIPLIERS, VIBE_TYPES, ORBIT_VIBE_MULTIPLIERS } from '../engine/schema.js'
@@ -207,168 +208,6 @@ function usePersistedBool(key, defaultValue) {
     try { localStorage.setItem(key, v ? '1' : '0') } catch { /* ignore */ }
   }, [key, v])
   return [v, setV]
-}
-
-function PmTaskMultipliersEditor({ baselineTasks = [], value, onChange }) {
-  const PM_PHASES = useMemo(() => ([
-    'Project Start M0',
-    'Project Start M1',
-    'Project Mid',
-    'Project End M-1',
-    'Project End M0',
-    'Project End M1',
-    'Project End M1+',
-  ]), [])
-
-  const pmRows = useMemo(() => {
-    return (Array.isArray(baselineTasks) ? baselineTasks : [])
-      .filter(r => String(r?.role || '').trim().toUpperCase() === 'PM')
-      .map(r => ({
-        stage: String(r?.stage || '').trim(),       // customer journey stage
-        taskStage: String(r?.taskStage || '').trim(),
-        phaseHours: r?.phaseHours || {},
-      }))
-      .filter(r => r.stage && r.taskStage)
-  }, [baselineTasks])
-
-  const stages = useMemo(() => {
-    const set = new Set(pmRows.map(r => r.stage))
-    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))]
-  }, [pmRows])
-
-  const [stageFilter, setStageFilter] = useState('All')
-  const [taskFilter, setTaskFilter] = useState('All')
-
-  const taskStages = useMemo(() => {
-    const filtered = stageFilter === 'All' ? pmRows : pmRows.filter(r => r.stage === stageFilter)
-    const set = new Set(filtered.map(r => r.taskStage))
-    return ['All', ...Array.from(set).sort((a, b) => a.localeCompare(b))]
-  }, [pmRows, stageFilter])
-
-  useEffect(() => {
-    if (!taskStages.includes(taskFilter)) setTaskFilter('All')
-  }, [taskStages]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const overridesByKey = (value && typeof value === 'object' ? value?.overridesByKey : null) || {}
-  const normKey = (stage, taskStage) => `${String(stage || '').trim()}__${String(taskStage || '').trim()}`
-
-  const effectiveRows = useMemo(() => {
-    const filtered = pmRows.filter(r => (
-      (stageFilter === 'All' || r.stage === stageFilter) &&
-      (taskFilter === 'All' || r.taskStage === taskFilter)
-    ))
-    return filtered
-      .slice()
-      .sort((a, b) => (a.stage !== b.stage ? a.stage.localeCompare(b.stage) : a.taskStage.localeCompare(b.taskStage)))
-  }, [pmRows, stageFilter, taskFilter])
-
-  const setOverride = (stage, taskStage, phase, nextVal) => {
-    const key = normKey(stage, taskStage)
-    const next = { ...(overridesByKey || {}) }
-    const row = { ...(next[key] || {}) }
-    if (nextVal === null) delete row[phase]
-    else row[phase] = nextVal
-    if (Object.keys(row).length) next[key] = row
-    else delete next[key]
-    onChange?.(Object.keys(next).length ? { overridesByKey: next } : null)
-  }
-
-  if (!pmRows.length) {
-    return (
-      <div style={{ fontSize: 12.5, color: 'var(--ink-faint)', lineHeight: 1.6 }}>
-        This workbook doesn’t include the task-level “Customer Journey Stage / Stage / Role” section in <strong>Demand Base Matrix</strong>.
-      </div>
-    )
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'end', marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: 'var(--ink-muted)', marginBottom: 6 }}>
-            Customer journey stage
-          </div>
-          <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} style={{ width: 260, padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border)' }}>
-            {stages.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <div>
-          <div style={{ fontSize: 10.5, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.6px', color: 'var(--ink-muted)', marginBottom: 6 }}>
-            Stage
-          </div>
-          <select value={taskFilter} onChange={(e) => setTaskFilter(e.target.value)} style={{ width: 420, maxWidth: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border)' }}>
-            {taskStages.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        {!!Object.keys(overridesByKey || {}).length && (
-          <button onClick={() => onChange?.(null)} style={{ padding: '8px 10px', borderRadius: 10, border: '1px solid rgba(248,113,113,0.35)', background: 'transparent', color: 'var(--red)', fontWeight: 900, cursor: 'pointer', marginLeft: 'auto' }}>
-            Reset PM multipliers
-          </button>
-        )}
-      </div>
-
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <thead style={{ background: 'var(--surface-1)' }}>
-            <tr>
-              {['Customer journey', 'Stage', 'Role', ...PM_PHASES].map(h => (
-                <th key={h} style={{ textAlign: 'left', padding: '10px 12px', borderBottom: '1px solid var(--border)', fontSize: 10.5, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.6px', color: 'var(--ink-muted)', whiteSpace: 'nowrap' }}>
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {effectiveRows.map((r, i) => {
-              const key = normKey(r.stage, r.taskStage)
-              const ov = overridesByKey?.[key] || null
-              return (
-                <tr key={key} style={{ background: i % 2 ? 'var(--surface-1)' : 'white', borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '10px 12px', fontWeight: 900, color: 'var(--ink)', whiteSpace: 'nowrap' }}>{r.stage}</td>
-                  <td style={{ padding: '10px 12px', color: 'var(--ink-muted)', minWidth: 260 }}>{r.taskStage}</td>
-                  <td style={{ padding: '10px 12px', fontFamily: 'var(--font-mono)', color: 'var(--ink-faint)' }}>PM</td>
-                  {PM_PHASES.map(ph => {
-                    const base = Number(r.phaseHours?.[ph] || 0)
-                    const has = ov && ov[ph] !== undefined && ov[ph] !== null
-                    const eff = has ? Number(ov[ph]) : base
-                    const changed = has && Number.isFinite(eff) && eff !== base
-                    return (
-                      <td key={ph} style={{ padding: '8px 12px' }}>
-                        <input
-                          type="number"
-                          value={Number.isFinite(eff) ? eff : ''}
-                          onChange={(e) => {
-                            const raw = e.target.value
-                            if (raw === '') return setOverride(r.stage, r.taskStage, ph, null)
-                            const n = Number(raw)
-                            if (!Number.isFinite(n)) return
-                            setOverride(r.stage, r.taskStage, ph, n)
-                          }}
-                          style={{
-                            width: 120,
-                            padding: '10px 12px',
-                            borderRadius: 10,
-                            border: `1px solid ${changed ? 'rgba(167,139,250,0.55)' : 'var(--border)'}`,
-                            fontFamily: 'var(--font-mono)',
-                            background: changed ? 'rgba(167,139,250,0.08)' : 'white',
-                          }}
-                        />
-                        {changed ? (
-                          <div style={{ marginTop: 4, fontSize: 10.5, color: 'var(--ink-faint)' }}>
-                            baseline {base}
-                          </div>
-                        ) : null}
-                      </td>
-                    )
-                  })}
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
 }
 
 function clampPct(v) {
@@ -1046,8 +885,8 @@ export default function CapacitySetupView({
   onUpdateCapacityConfig, // ({ capacityConfig })
 }) {
   const { data: engineData, loading, error } = useEngineInsightsData(engineInput, true)
-  const baselineDemandTasks = engineInput?.ingest?.demandTasks || engineInput?.demandTasks || null
   const baselineOrbit = engineInput?.ingest?.orbitMultipliers || engineInput?.orbitMultipliers || {}
+  const baselineProjects = engineInput?.ingest?.projects || engineInput?.projects || []
 
   const roster = engineData?.roster || []
   const people = useMemo(() => uniquePeopleFromRoster(roster), [roster])
@@ -1115,10 +954,6 @@ export default function CapacitySetupView({
   const orbitOverrides = useMemo(() => {
     const o = capacityConfig?.orbitVibeMultipliers
     return (o && typeof o === 'object') ? o : {}
-  }, [capacityConfig])
-  const pmTaskOverrides = useMemo(() => {
-    const p = capacityConfig?.pmTaskMultipliers
-    return (p && typeof p === 'object') ? p : null
   }, [capacityConfig])
 
   const setCapacityField = useCallback(async (patch) => {
@@ -1263,8 +1098,7 @@ export default function CapacitySetupView({
   const [openBackfill, setOpenBackfill] = usePersistedBool('spark_ap_open_backfill', availabilityUnallocated.length > 0)
   const [allocInline, setAllocInline] = usePersistedBool('spark_ap_alloc_inline', false)
   const [backfillInline, setBackfillInline] = usePersistedBool('spark_ap_backfill_inline', false)
-  const [pmModalOpen, setPmModalOpen] = useState(false)
-  const [pmInline, setPmInline] = usePersistedBool('spark_ap_pm_inline', false)
+  const [advMultInline, setAdvMultInline] = usePersistedBool('spark_ap_adv_mult_inline', false)
 
   const [peopleModalOpen, setPeopleModalOpen] = useState(false)
   const [peopleModalFocus, setPeopleModalFocus] = useState('alloc') // 'alloc' | 'backfill'
@@ -2225,7 +2059,7 @@ export default function CapacitySetupView({
 
               <details style={{ border: '1px solid var(--border)', borderRadius: 14, overflow: 'hidden' }}>
                 <summary style={{ listStyle: 'none', cursor: 'pointer', padding: '12px 14px', background: 'var(--surface-1)', display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
-                  <div style={{ fontWeight: 900, color: 'var(--ink)' }}>PM Multipliers</div>
+                  <div style={{ fontWeight: 900, color: 'var(--ink)' }}>Advanced multipliers</div>
                   <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--ink-muted)' }}>▾</div>
                 </summary>
                 <div style={{ padding: 14 }}>
@@ -2238,25 +2072,25 @@ export default function CapacitySetupView({
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
                       <div style={{ fontWeight: 900, color: 'var(--ink)' }}>Primary form</div>
                       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <ActionButton onClick={() => setPmModalOpen(true)}>Open full screen</ActionButton>
                         <button
-                          onClick={() => setPmInline(v => !v)}
+                          onClick={() => setAdvMultInline(v => !v)}
                           style={{ padding: '8px 10px', borderRadius: 10, border: '1px solid var(--border)', background: 'white', color: 'var(--ink-muted)', fontWeight: 850, cursor: 'pointer' }}
                           title="Show/hide inline editor"
                         >
-                          {pmInline ? 'Hide inline' : 'Edit inline'}
+                          {advMultInline ? 'Hide inline' : 'Edit inline'}
                         </button>
                       </div>
                     </div>
-                    {pmInline ? (
-                      <PmTaskMultipliersEditor
-                        baselineTasks={baselineDemandTasks || []}
-                        value={pmTaskOverrides}
-                        onChange={(next) => setCapacityField({ pmTaskMultipliers: next || undefined })}
+                    {advMultInline ? (
+                      <AdvancedMultipliersEditor
+                        projects={baselineProjects || []}
+                        value={capacityConfig?.advancedMultipliers}
+                        onChange={(next) => setCapacityField({ advancedMultipliers: next || undefined })}
+                        mode="plan"
                       />
                     ) : (
                       <div style={{ fontSize: 12.5, color: 'var(--ink-muted)', lineHeight: 1.7 }}>
-                        Use <strong>Open full screen</strong> for editing. Inline editing is available, but the full-screen view is best for scanning the full table.
+                        Advanced multipliers reconstruct <strong>PM stage hours</strong> when the workbook omits PM stage-hour columns on Project List. Use <strong>Edit inline</strong> to review or override defaults and set per-project flags.
                       </div>
                     )}
                   </div>
@@ -2266,32 +2100,6 @@ export default function CapacitySetupView({
           ) : null}
         </Card>
       </div>
-
-      {pmModalOpen ? createPortal((
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{ position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.35)', zIndex: 1200, display: 'grid', placeItems: 'center', padding: 24, overflow: 'auto' }}
-          onMouseDown={(e) => { if (e.target === e.currentTarget) setPmModalOpen(false) }}
-        >
-          <div style={{ width: 'min(1200px, 98vw)', maxHeight: '90vh', overflow: 'hidden', background: 'white', borderRadius: 16, border: '1px solid var(--border)', boxShadow: '0 20px 60px rgba(15, 23, 42, 0.25)', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <div>
-                <div style={{ fontWeight: 900, fontSize: 14.5, letterSpacing: '-0.01em' }}>PM multipliers</div>
-                <div style={{ fontSize: 12, color: 'var(--ink-muted)' }}>Plan-wide demand driver (edits persist)</div>
-              </div>
-              <ActionButton onClick={() => setPmModalOpen(false)}>Close</ActionButton>
-            </div>
-            <div style={{ padding: 16, overflow: 'auto' }}>
-              <PmTaskMultipliersEditor
-                baselineTasks={baselineDemandTasks || []}
-                value={pmTaskOverrides}
-                onChange={(next) => setCapacityField({ pmTaskMultipliers: next || undefined })}
-              />
-            </div>
-          </div>
-        </div>
-      ), document.body) : null}
 
       {peopleModalOpen ? createPortal((
         <div

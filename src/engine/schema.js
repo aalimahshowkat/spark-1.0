@@ -192,6 +192,31 @@ export const NETWORK_TYPE_MULTIPLIERS = {
 }
 
 /**
+ * Non-standard data / metric / IVMS configuration → multipliers
+ * Source: Demand Base Matrix "Advanced multipliers" table (Excel).
+ *
+ * These are used for reconstructing PM phase hours when a workbook omits
+ * the PM stage-hour override columns on Project List.
+ */
+export const NON_STANDARD_DATA_MULTIPLIERS = {
+  Low: 1.00,
+  Medium: 1.25,
+  High: 1.50,
+}
+
+export const NON_STANDARD_METRIC_MULTIPLIERS = {
+  Low: 1.00,
+  Medium: 1.50,
+  High: 2.00,
+}
+
+export const IVMS_CONFIGURATION_MULTIPLIERS = {
+  Low: 1.00,
+  Medium: 1.50,
+  High: 2.00,
+}
+
+/**
  * VIBE-specific total hours per phase per role.
  * Source: right-side lookup table in Demand Base Matrix (cols 13-21).
  * This is the TOTAL hours for the entire project at that phase,
@@ -683,6 +708,11 @@ export const PROJECT_LIST_COLUMN_MAP = {
   nonStandardData:      ['Non-Standard Data'],
   nonStandardMetric:    ['Non-Standard Metric'],
   ivmsConfiguration:    ['IVMS Configuration'],
+  // Optional precomputed multipliers (present in some workbooks; used for parity scripts / debugging)
+  dxTxMultiplier:              ['Dx/Tx Multiplier'],
+  nonStandardDataMultiplier:   ['Non-Standard Data Multiplier'],
+  nonStandardMetricMultiplier: ['Non-Standard Metric Multiplier'],
+  ivmsConfigurationMultiplier: ['IVMS Configuration Multiplier'],
   orbit:                ['Orbit', 'orbit', 'ORBIT'],
   plannedDueDate:       ['Planned Due Date (PDD)'],
   edd:                  ['Estimated Delivery Date (EDD)', 'EDD'],
