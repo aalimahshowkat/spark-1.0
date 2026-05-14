@@ -42,12 +42,19 @@ async function fetchBundledDefaultPlanFingerprint() {
   let lastErr = null
   for (const url of urls) {
     try {
-      const r = await fetch(url, { method: 'HEAD', cache: 'no-store' })
+      // Prefer HEAD (cheap). Some hosts block HEAD; fall back to GET and cancel body.
+      let r = await fetch(url, { method: 'HEAD', cache: 'no-store' })
+      if (!r.ok) {
+        // 405/403/etc — try GET and cancel body.
+        r = await fetch(url, { method: 'GET', cache: 'no-store' })
+      }
       if (!r.ok) {
         lastErr = new Error(`Default plan not found at ${url} (${r.status}).`)
         continue
       }
-      return fingerprintFromHeaders(r.headers)
+      const fp = fingerprintFromHeaders(r.headers)
+      try { await r.body?.cancel?.() } catch { /* ignore */ }
+      return fp
     } catch (e) {
       lastErr = e
     }
@@ -520,8 +527,23 @@ export function usePersistedBaseDataset() {
         const remoteModOk = remoteMod instanceof Date && !isNaN(remoteMod.getTime())
 
         const fingerprintDiff = !!(currentFp && remoteFp && currentFp !== remoteFp)
+
+        const remoteLen = Number(fp?.contentLength || 0)
+        const currentLen = Number(base?.workbookBlob?.size || 0)
+        const lengthDiff = remoteLen > 0 && currentLen > 0 ? (remoteLen !== currentLen) : false
+
+        const currentSaved = base?.savedAt ? new Date(base.savedAt) : null
+        const currentSavedOk = currentSaved instanceof Date && !isNaN(currentSaved.getTime())
+
         const modifiedDiff = currentModOk && remoteModOk ? (remoteMod.getTime() - currentMod.getTime() > 60 * 1000) : false
-        const available = fingerprintDiff || (!currentFp && modifiedDiff)
+        const savedDiff = currentSavedOk && remoteModOk ? (remoteMod.getTime() - currentSaved.getTime() > 60 * 1000) : false
+
+        // If we can't compare fingerprints (older saved plans may not have it),
+        // fall back to size + Last-Modified comparisons.
+        const available =
+          fingerprintDiff ||
+          (!fingerprintDiff && lengthDiff) ||
+          (!currentFp && (modifiedDiff || savedDiff))
 
         setBundledDefaultUpdate({
           checking: false,
@@ -530,7 +552,7 @@ export function usePersistedBaseDataset() {
           lastModified: fp?.lastModified || '',
           contentLength: fp?.contentLength || '',
           fingerprint: fp?.fingerprint || '',
-          reason: fingerprintDiff ? 'fingerprint_changed' : (available ? 'last_modified_newer' : ''),
+          reason: fingerprintDiff ? 'fingerprint_changed' : lengthDiff ? 'content_length_changed' : (available ? 'last_modified_newer' : ''),
         })
 
         // Auto-update ONLY when user has not edited the bundled default locally.
