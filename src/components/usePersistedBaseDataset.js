@@ -3,6 +3,7 @@ import { ingestExcelFile } from '../engine/ingest.js'
 import { clearBaseDataset, loadBaseDataset, saveBaseDataset } from '../lib/datasetStore'
 
 const DEFAULT_PLAN_FILENAME = 'default-plan.xlsx'
+const DEFAULT_PLAN_META_FILENAME = 'default-plan.meta.json'
 
 function safeText(s) {
   return String(s || '').trim()
@@ -37,7 +38,50 @@ function defaultPlanUrlCandidates() {
   ]
 }
 
+function defaultPlanMetaUrlCandidates() {
+  const base = (import.meta?.env?.BASE_URL || './')
+  return [
+    new URL(DEFAULT_PLAN_META_FILENAME, window.location.href).toString(),
+    new URL(DEFAULT_PLAN_META_FILENAME, new URL(base, window.location.href)).toString(),
+    new URL(`/${DEFAULT_PLAN_META_FILENAME}`, window.location.origin).toString(),
+  ]
+}
+
+async function fetchBundledDefaultPlanMeta() {
+  const urls = defaultPlanMetaUrlCandidates()
+  let res = null
+  let lastErr = null
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' })
+      if (r.ok) { res = r; break }
+      lastErr = new Error(`Default plan meta not found at ${url} (${r.status}).`)
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  if (!res) throw (lastErr || new Error('Default plan meta not found.'))
+  const json = await res.json()
+  const workbookModifiedAt = safeText(json?.workbookModifiedAt || '')
+  const size = Number(json?.size || 0)
+  const version = safeText(json?.version || '') || [workbookModifiedAt, size || ''].filter(Boolean).join('__')
+  return { workbookModifiedAt, size, version }
+}
+
 async function fetchBundledDefaultPlanFingerprint() {
+  // Preferred: meta JSON (reliable even when hosts strip headers)
+  try {
+    const meta = await fetchBundledDefaultPlanMeta()
+    return {
+      etag: '',
+      lastModified: meta?.workbookModifiedAt || '',
+      contentLength: meta?.size ? String(meta.size) : '',
+      fingerprint: safeText(meta?.version || ''),
+    }
+  } catch {
+    // fall back to headers-based fingerprint below
+  }
+
   const urls = defaultPlanUrlCandidates()
   let lastErr = null
   for (const url of urls) {
@@ -83,7 +127,13 @@ async function fetchBundledDefaultPlanFile() {
   const file = new File([blob], 'SPARK Default Plan.xlsx', {
     type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   })
-  return { file, blob, fingerprint: fp }
+  // Try to augment fingerprint with meta JSON if present.
+  let meta = null
+  try { meta = await fetchBundledDefaultPlanMeta() } catch { meta = null }
+  const effectiveFp = meta?.version
+    ? { etag: '', lastModified: meta.workbookModifiedAt || fp.lastModified || '', contentLength: meta.size ? String(meta.size) : fp.contentLength || '', fingerprint: meta.version }
+    : fp
+  return { file, blob, fingerprint: effectiveFp }
 }
 
 function summarizeIngest(ingest) {
