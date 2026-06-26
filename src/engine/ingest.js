@@ -209,9 +209,27 @@ function parseProjectRow(row, index, hasOrbitColumn) {
 
     const id         = get('id') || generateId(name)
     const displayId  = get('displayId') || ''
-    const startDate  = parseDate(get('startDate'))
+    let startDate    = parseDate(get('startDate'))
     const delivDate  = parseDate(get('deliveryDate'))
     const analyticsStartDate = parseDate(get('analyticsStartDate'))
+
+    // Some workbooks ship with a blank/invalid "Created Main" (start month) even though
+    // projects and delivery dates are present. Without a start month, the phase engine
+    // returns NA for all months and demand becomes 0 across the app.
+    //
+    // Heuristic (best-effort):
+    // - Prefer analytics start (minus 1 month) when present
+    // - Else fall back to delivery month (minus 2 months)
+    // - Clamp to not exceed delivery month
+    if (!startDate && delivDate) {
+      const toMonthStartLocal = (d) => new Date(d.getFullYear(), d.getMonth(), 1)
+      const shiftMonths = (d, n) => new Date(d.getFullYear(), d.getMonth() + n, 1)
+      let inferred = null
+      if (analyticsStartDate) inferred = shiftMonths(toMonthStartLocal(analyticsStartDate), -1)
+      else inferred = shiftMonths(toMonthStartLocal(delivDate), -2)
+      if (inferred && inferred > delivDate) inferred = toMonthStartLocal(delivDate)
+      startDate = inferred
+    }
     // Excel Analyst proration uses Capacity Model col U (EDD-like exact date).
     // Use Project List EDD when available; fall back to raw delivery fields.
     const deliveryDateExact = (

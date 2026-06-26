@@ -46,6 +46,10 @@ function safeJsonParse(raw) {
   try { return JSON.parse(raw) } catch { return null }
 }
 
+function safeText(s) {
+  return String(s || '').trim()
+}
+
 function titleFromFirstQuestion(text) {
   const t = String(text || '').trim()
   if (!t) return 'New chat'
@@ -437,6 +441,115 @@ function buildCapacityContext(calc, insightsData, planName, capacityConfig = nul
   return lines.join('\n')
 }
 
+// Build a compact, on-demand snippet to answer:
+// "How many hours is <person> working this month across roles (PM + Analyst + ...)?"
+function buildPersonMultiRoleSnippet(calc, userText, roster = []) {
+  const text = safeText(userText)
+  if (!calc || !text) return ''
+
+  const unstaffed = new Set((UNSTAFFED_PERSON_NAMES || []).map(s => safeText(s)).filter(Boolean))
+  const demandByPerson = calc?.demandByPerson || {}
+
+  const rosterNames = (Array.isArray(roster) ? roster : [])
+    .map(p => safeText(p?.name))
+    .filter(Boolean)
+
+  const seenNames = new Set()
+  for (const v of Object.values(demandByPerson || {})) {
+    const n = safeText(v?.name)
+    if (n && !unstaffed.has(n)) seenNames.add(n)
+  }
+  const knownNames = [...new Set([...rosterNames, ...seenNames])]
+
+  const lower = text.toLowerCase()
+  const tokens = lower.split(/[^a-z]+/g).filter(Boolean)
+  const commonPrefixLen = (a, b) => {
+    const x = String(a || '')
+    const y = String(b || '')
+    const n = Math.min(x.length, y.length)
+    let i = 0
+    while (i < n && x[i] === y[i]) i++
+    return i
+  }
+  const tokenMatchesFirst = (token, firstLower) => {
+    if (!token || !firstLower) return false
+    if (token === firstLower) return true
+    // tolerate small misspells like "aalimaah" vs "aalimah"
+    return commonPrefixLen(token, firstLower) >= 4
+  }
+
+  const mentioned = []
+  for (const fullName of knownNames) {
+    const fullLower = fullName.toLowerCase()
+    const firstLower = fullLower.split(' ').filter(Boolean)[0] || ''
+    const fullInText = fullLower.length >= 6 && lower.includes(fullLower)
+    const firstInText = firstLower.length >= 3 && tokens.some(t => tokenMatchesFirst(t, firstLower))
+    if (fullInText || firstInText) mentioned.push(fullName)
+  }
+
+  // If many matches (e.g. common first names), keep only the best (prefer full-name matches).
+  const uniq = [...new Set(mentioned)]
+  if (!uniq.length) return ''
+  const ranked = uniq
+    .map(n => ({ n, full: lower.includes(n.toLowerCase()), len: n.length }))
+    .sort((a, b) => (b.full - a.full) || (b.len - a.len))
+    .slice(0, 3)
+    .map(x => x.n)
+
+  const selectedLower = new Set(ranked.map(n => n.toLowerCase()))
+  const byName = new Map() // lowerName -> { name, byRole: Map(role -> monthly[12]) }
+
+  for (const row of Object.values(demandByPerson || {})) {
+    const name = safeText(row?.name)
+    const role = safeText(row?.role)
+    if (!name || !role) continue
+    if (unstaffed.has(name)) continue
+    if (!selectedLower.has(name.toLowerCase())) continue
+    const monthly = Array.isArray(row?.monthly) ? row.monthly : new Array(12).fill(0)
+    const rec = byName.get(name.toLowerCase()) || { name, byRole: new Map() }
+    const prev = rec.byRole.get(role) || new Array(12).fill(0)
+    const next = prev.map((v, i) => (v || 0) + (Number(monthly?.[i]) || 0))
+    rec.byRole.set(role, next)
+    byName.set(name.toLowerCase(), rec)
+  }
+
+  const monthLabels = Array.isArray(MONTHS) && MONTHS.length === 12 ? MONTHS : ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  const renderRow = (label, arr) => {
+    const l = String(label || '').slice(0, 18).padEnd(18)
+    const cells = (arr || new Array(12).fill(0)).map(v => String(Math.round(Number(v) || 0)).padStart(7)).join('')
+    return `  ${l}${cells}`
+  }
+
+  const out = []
+  out.push('')
+  out.push('=== PERSON MULTI-ROLE WORKLOAD (HOURS) ===')
+  out.push('Use this section when the user asks for a person’s total hours across roles (e.g., PM + Analyst) in a month.')
+
+  for (const name of ranked) {
+    const rec = byName.get(name.toLowerCase())
+    if (!rec) continue
+    const roles = [...rec.byRole.keys()].sort((a, b) => a.localeCompare(b))
+    const totalByMonth = new Array(12).fill(0)
+    for (const role of roles) {
+      const arr = rec.byRole.get(role) || new Array(12).fill(0)
+      for (let i = 0; i < 12; i++) totalByMonth[i] += (Number(arr[i]) || 0)
+    }
+    const annualTotal = totalByMonth.reduce((a, b) => a + (b || 0), 0)
+
+    out.push('')
+    out.push(`Person: ${name}`)
+    out.push('  ' + ''.padEnd(18) + monthLabels.map(m => String(m).padStart(7)).join('') + '   | Annual')
+    out.push(renderRow('TOTAL (all roles)', totalByMonth) + `   | ${Math.round(annualTotal)}`)
+    for (const role of roles) {
+      const arr = rec.byRole.get(role) || new Array(12).fill(0)
+      const ann = arr.reduce((a, b) => a + (b || 0), 0)
+      out.push(renderRow(role, arr) + `   | ${Math.round(ann)}`)
+    }
+  }
+
+  return out.join('\n')
+}
+
 function buildSystemPrompt(calc, insightsData, planName, capacityConfig) {
   return `You are SPARK AI — an expert capacity planning assistant for the CS&T (Customer Success & Transformation) delivery team at AiDash.
 
@@ -531,7 +644,8 @@ ${buildCapacityContext(calc, insightsData, planName, capacityConfig)}
 
 HOW TO ANSWER:
 - Cite specific numbers. Example: "In Sep, CSM workload is **1,340h** vs effective capacity **1,120h** (capacity shortfall **335h**)."
-- For a PERSON in a MONTH: use the person’s monthly demand from the "TOP PEOPLE (MONTHLY DEMAND)" sections. Individual monthly capacity depends on their FTE × role allocation % × calendar-aware hours/day (and the 80% attrition factor used for “effective” views).
+- For a PERSON in a MONTH: use the person’s monthly demand from the "TOP PEOPLE (MONTHLY DEMAND)" sections.
+- If the user asks for a person who works across multiple roles (e.g., PM + Analyst), use the "PERSON MULTI-ROLE WORKLOAD (HOURS)" section when present (it provides totals + role split).
 - For “who can help cover a shortfall”: use "UNALLOCATED BANDWIDTH (TOP PEOPLE…)" for that role and month, and propose 2–5 names with unallocated hours.
 - For what-if questions, reason through step by step using the project list above
 - For people questions, use the team utilisation data
@@ -895,6 +1009,10 @@ export default function SparkAiView({ engineCalc, engineInput, planName }) {
     setStreaming(true)
 
     try {
+      const roster = Array.isArray(insightsData?.roster) ? insightsData.roster : []
+      const personSnippet = buildPersonMultiRoleSnippet(engineCalc, userText, roster)
+      const systemWithSnippet = personSnippet ? (systemPrompt + '\n' + personSnippet) : systemPrompt
+
       const res = await fetch(PROXY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -903,7 +1021,7 @@ export default function SparkAiView({ engineCalc, engineInput, planName }) {
         body: JSON.stringify({
           model: MODEL,
           max_tokens: 1024,
-          system: systemPrompt,
+          system: systemWithSnippet,
           messages: history.map(m => ({ role: m.role, content: m.content, image: m.image })),
         }),
       })
@@ -968,7 +1086,7 @@ export default function SparkAiView({ engineCalc, engineInput, planName }) {
       setStreaming(false)
       setTimeout(() => textareaRef.current?.focus(), 50)
     }
-  }, [input, attachment, messages, streaming, systemPrompt, proxyOk, authRequired, authenticated, maybeAutoTitleActiveChat])
+  }, [input, attachment, messages, streaming, systemPrompt, engineCalc, insightsData, proxyOk, authRequired, authenticated, maybeAutoTitleActiveChat])
 
   const hasData   = !!engineCalc
   const projCount = engineCalc?.meta?.projectsCalculated || 0
